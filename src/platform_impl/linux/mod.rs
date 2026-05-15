@@ -81,6 +81,8 @@ pub struct PlatformSpecificWindowBuilderAttributes {
     pub activation_token: Option<ActivationToken>,
     #[cfg(x11_platform)]
     pub x11: X11WindowBuilderAttributes,
+    #[cfg(wayland_platform)]
+    pub wayland: WaylandWindowBuilderAttributes,
 }
 
 #[derive(Clone)]
@@ -94,6 +96,12 @@ pub struct X11WindowBuilderAttributes {
 
     /// The parent window to embed this window into.
     pub embed_window: Option<x11rb::protocol::xproto::Window>,
+}
+
+#[derive(Clone, Default)]
+#[cfg(wayland_platform)]
+pub struct WaylandWindowBuilderAttributes {
+    pub layer_shell: Option<crate::platform::wayland::LayerShellAttributes>,
 }
 
 impl Default for PlatformSpecificWindowBuilderAttributes {
@@ -110,6 +118,8 @@ impl Default for PlatformSpecificWindowBuilderAttributes {
                 x11_window_types: vec![XWindowType::Normal],
                 embed_window: None,
             },
+            #[cfg(wayland_platform)]
+            wayland: WaylandWindowBuilderAttributes::default(),
         }
     }
 }
