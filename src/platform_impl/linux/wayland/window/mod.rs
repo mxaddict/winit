@@ -11,9 +11,11 @@ use sctk::reexports::client::QueueHandle;
 
 use sctk::compositor::{CompositorState, Region, SurfaceData};
 use sctk::reexports::protocols::xdg::activation::v1::client::xdg_activation_v1::XdgActivationV1;
-use sctk::shell::xdg::window::Window as SctkWindow;
+use sctk::shell::wlr_layer::{Anchor as SctkAnchor, KeyboardInteractivity as SctkKi, Layer as SctkLayer};
 use sctk::shell::xdg::window::WindowDecorations;
 use sctk::shell::WaylandSurface;
+
+use crate::platform::wayland::{Anchor as WinitAnchor, KeyboardInteractivity as WinitKi, Layer as WinitLayer};
 
 use crate::dpi::{LogicalSize, PhysicalPosition, PhysicalSize, Position, Size};
 use crate::error::{ExternalError, NotSupportedError, OsError as RootOsError};
@@ -40,8 +42,8 @@ pub use state::WindowState;
 
 /// The Wayland window.
 pub struct Window {
-    /// Reference to the underlying SCTK window.
-    window: SctkWindow,
+    /// The underlying shell role for this window.
+    window: state::Shell,
 
     /// Window id.
     window_id: WindowId,
@@ -101,25 +103,110 @@ impl Window {
             .inner_size
             .unwrap_or(LogicalSize::new(800., 600.).into());
 
-        // We prefer server side decorations, however to not have decorations we ask for client
-        // side decorations instead.
-        let default_decorations = if attributes.decorations {
-            WindowDecorations::RequestServer
+        // Build the shell role: layer surface if requested, otherwise xdg toplevel.
+        let shell = if let Some(layer_attrs) = platform_attributes.wayland.layer_shell {
+            // If the compositor does not advertise wlr-layer-shell, return an error so the
+            // caller can fall back to an xdg toplevel.
+            let layer_shell = state.layer_shell.as_ref().ok_or_else(|| {
+                os_error!(OsError::Misc(
+                    "compositor does not support wlr-layer-shell; fall back to xdg toplevel"
+                ))
+            })?;
+
+            let sctk_layer = convert_layer(layer_attrs.layer);
+            let sctk_anchor = convert_anchor(layer_attrs.anchor);
+            let sctk_ki = convert_keyboard_interactivity(layer_attrs.keyboard_interactivity);
+
+            // Resolve the output, if the caller pinned one.
+            let output = layer_attrs.output.as_ref().and_then(|mh| match &mh.inner {
+                crate::platform_impl::MonitorHandle::Wayland(wm) => Some(wm.proxy.clone()),
+                #[cfg(x11_platform)]
+                crate::platform_impl::MonitorHandle::X(_) => None,
+            });
+
+            let layer_surface = layer_shell.create_layer_surface(
+                &queue_handle,
+                surface.clone(),
+                sctk_layer,
+                Some(layer_attrs.namespace.as_str()),
+                output.as_ref(),
+            );
+
+            // Apply double-buffered state before the initial commit.
+            layer_surface.set_anchor(sctk_anchor);
+            layer_surface.set_exclusive_zone(layer_attrs.exclusive_zone);
+            let (mt, mr, mb, ml) = layer_attrs.margin;
+            layer_surface.set_margin(mt, mr, mb, ml);
+            layer_surface.set_keyboard_interactivity(sctk_ki);
+            // Use (0, 0) so the compositor derives size from the anchor configuration.
+            layer_surface.set_size(0, 0);
+            layer_surface.commit();
+
+            state::Shell::Layer(layer_surface)
         } else {
-            WindowDecorations::RequestClient
+            // Standard xdg toplevel path.
+            // We prefer server side decorations, however to not have decorations we ask for
+            // client side decorations instead.
+            let default_decorations = if attributes.decorations {
+                WindowDecorations::RequestServer
+            } else {
+                WindowDecorations::RequestClient
+            };
+
+            let xdg_window =
+                state
+                    .xdg_shell
+                    .create_window(surface.clone(), default_decorations, &queue_handle);
+
+            // Set the app_id.
+            if let Some(name) = platform_attributes.name.map(|name| name.general) {
+                xdg_window.set_app_id(name);
+            }
+
+            // Set startup mode.
+            match attributes.fullscreen.0.map(Into::into) {
+                Some(Fullscreen::Exclusive(_)) => {
+                    warn!("`Fullscreen::Exclusive` is ignored on Wayland");
+                }
+                Some(Fullscreen::Borderless(monitor)) => {
+                    let output = monitor.and_then(|monitor| match monitor {
+                        PlatformMonitorHandle::Wayland(monitor) => Some(monitor.proxy),
+                        #[cfg(x11_platform)]
+                        PlatformMonitorHandle::X(_) => None,
+                    });
+
+                    xdg_window.set_fullscreen(output.as_ref())
+                }
+                _ if attributes.maximized => xdg_window.set_maximized(),
+                _ => (),
+            };
+
+            // Activate the window when the token is passed.
+            if let (Some(xdg_activation), Some(token)) = (
+                xdg_activation.as_ref(),
+                platform_attributes.activation_token,
+            ) {
+                xdg_activation.activate(token._token, &surface);
+            }
+
+            // XXX Do initial commit.
+            xdg_window.commit();
+
+            state::Shell::Xdg(xdg_window)
         };
 
-        let window =
-            state
-                .xdg_shell
-                .create_window(surface.clone(), default_decorations, &queue_handle);
+        // Clone the shell to keep one copy on Self; the original moves into WindowState.
+        let shell_for_self = match &shell {
+            state::Shell::Xdg(w) => state::Shell::Xdg(w.clone()),
+            state::Shell::Layer(l) => state::Shell::Layer(l.clone()),
+        };
 
         let mut window_state = WindowState::new(
             event_loop_window_target.connection.clone(),
             &event_loop_window_target.queue_handle,
             &state,
             size,
-            window.clone(),
+            shell,
             attributes.preferred_theme,
         );
 
@@ -131,16 +218,11 @@ impl Window {
         // Set the decorations hint.
         window_state.set_decorate(attributes.decorations);
 
-        // Set the app_id.
-        if let Some(name) = platform_attributes.name.map(|name| name.general) {
-            window.set_app_id(name);
-        }
-
-        // Set the window title.
+        // Set the window title (no-op for layer surfaces).
         window_state.set_title(attributes.title);
 
         // Set the min and max sizes. We must set the hints upon creating a window, so
-        // we use the default `1.` scaling...
+        // we use the default `1.` scaling... (no-op for layer surfaces)
         let min_size = attributes.min_inner_size.map(|size| size.to_logical(1.));
         let max_size = attributes.max_inner_size.map(|size| size.to_logical(1.));
         window_state.set_min_inner_size(min_size);
@@ -148,35 +230,6 @@ impl Window {
 
         // Non-resizable implies that the min and max sizes are set to the same value.
         window_state.set_resizable(attributes.resizable);
-
-        // Set startup mode.
-        match attributes.fullscreen.0.map(Into::into) {
-            Some(Fullscreen::Exclusive(_)) => {
-                warn!("`Fullscreen::Exclusive` is ignored on Wayland");
-            }
-            Some(Fullscreen::Borderless(monitor)) => {
-                let output = monitor.and_then(|monitor| match monitor {
-                    PlatformMonitorHandle::Wayland(monitor) => Some(monitor.proxy),
-                    #[cfg(x11_platform)]
-                    PlatformMonitorHandle::X(_) => None,
-                });
-
-                window.set_fullscreen(output.as_ref())
-            }
-            _ if attributes.maximized => window.set_maximized(),
-            _ => (),
-        };
-
-        // Activate the window when the token is passed.
-        if let (Some(xdg_activation), Some(token)) = (
-            xdg_activation.as_ref(),
-            platform_attributes.activation_token,
-        ) {
-            xdg_activation.activate(token._token, &surface);
-        }
-
-        // XXX Do initial commit.
-        window.commit();
 
         // Add the window and window requests into the state.
         let window_state = Arc::new(Mutex::new(window_state));
@@ -223,7 +276,7 @@ impl Window {
         event_loop_awakener.ping();
 
         Ok(Self {
-            window,
+            window: shell_for_self,
             display,
             monitors,
             window_id,
@@ -236,6 +289,32 @@ impl Window {
             window_requests,
             window_events_sink,
         })
+    }
+}
+
+/// Convert public `Layer` enum to the sctk wlr_layer equivalent.
+fn convert_layer(layer: WinitLayer) -> SctkLayer {
+    match layer {
+        WinitLayer::Background => SctkLayer::Background,
+        WinitLayer::Bottom => SctkLayer::Bottom,
+        WinitLayer::Top => SctkLayer::Top,
+        WinitLayer::Overlay => SctkLayer::Overlay,
+    }
+}
+
+/// Convert public `Anchor` bitflags to the sctk wlr_layer equivalent.
+/// The two bitflag sets use identical bit assignments (TOP=1, BOTTOM=2, LEFT=4, RIGHT=8),
+/// so a direct bit cast is safe. We go via `from_bits_truncate` to stay explicit.
+fn convert_anchor(anchor: WinitAnchor) -> SctkAnchor {
+    SctkAnchor::from_bits_truncate(anchor.bits())
+}
+
+/// Convert public `KeyboardInteractivity` to the sctk wlr_layer equivalent.
+fn convert_keyboard_interactivity(ki: WinitKi) -> SctkKi {
+    match ki {
+        WinitKi::None => SctkKi::None,
+        WinitKi::OnDemand => SctkKi::OnDemand,
+        WinitKi::Exclusive => SctkKi::Exclusive,
     }
 }
 
@@ -440,7 +519,10 @@ impl Window {
             return;
         }
 
-        self.window.set_minimized();
+        // Minimize is an xdg_toplevel feature; layer surfaces are always visible.
+        if let state::Shell::Xdg(w) = &self.window {
+            w.set_minimized();
+        }
     }
 
     #[inline]
@@ -456,10 +538,13 @@ impl Window {
 
     #[inline]
     pub fn set_maximized(&self, maximized: bool) {
-        if maximized {
-            self.window.set_maximized()
-        } else {
-            self.window.unset_maximized()
+        // Maximize is an xdg_toplevel feature; layer surfaces fill the output via anchoring.
+        if let state::Shell::Xdg(w) = &self.window {
+            if maximized {
+                w.set_maximized()
+            } else {
+                w.unset_maximized()
+            }
         }
     }
 
@@ -484,6 +569,11 @@ impl Window {
 
     #[inline]
     pub(crate) fn set_fullscreen(&self, fullscreen: Option<Fullscreen>) {
+        // Fullscreen is an xdg_toplevel feature; layer surfaces use anchor+size instead.
+        let w = match &self.window {
+            state::Shell::Xdg(w) => w,
+            state::Shell::Layer(_) => return,
+        };
         match fullscreen {
             Some(Fullscreen::Exclusive(_)) => {
                 warn!("`Fullscreen::Exclusive` is ignored on Wayland");
@@ -495,9 +585,9 @@ impl Window {
                     PlatformMonitorHandle::X(_) => None,
                 });
 
-                self.window.set_fullscreen(output.as_ref())
+                w.set_fullscreen(output.as_ref())
             }
-            None => self.window.unset_fullscreen(),
+            None => w.unset_fullscreen(),
         }
     }
 
