@@ -700,7 +700,7 @@ impl WindowState {
     }
 
     /// Resize the window to the new inner size.
-    fn resize(&mut self, inner_size: LogicalSize<u32>) {
+    pub(crate) fn resize(&mut self, inner_size: LogicalSize<u32>) {
         self.size = inner_size;
 
         // Update the stateless size.

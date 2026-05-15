@@ -463,13 +463,23 @@ impl LayerShellHandler for WinitState {
             let mut ws = window_state.lock().unwrap();
             ws.mark_layer_configured();
 
-            // Zero values in configure.new_size mean "you decide" — keep current size.
+            // Per zwlr_layer_surface_v1.configure: zero on EITHER axis means
+            // "client decides for that axis". Mix axis-by-axis with the
+            // current size instead of treating any zero as "keep both".
             let (new_w, new_h) = configure.new_size;
-            let new_size = if new_w > 0 && new_h > 0 {
-                LogicalSize::new(new_w, new_h)
-            } else {
-                ws.inner_size()
-            };
+            let current = ws.inner_size();
+            let new_size = LogicalSize::new(
+                if new_w > 0 { new_w } else { current.width },
+                if new_h > 0 { new_h } else { current.height },
+            );
+
+            // Actually mutate the WindowState's size. Without this, wgpu's
+            // swapchain and the compositor disagree on dimensions and present
+            // blocks after the first frame; the xdg path mutates size inside
+            // its own configure() — mirror that here.
+            if new_size != current {
+                ws.resize(new_size);
+            }
 
             self.window_compositor_updates[pos].size = Some(new_size);
         }
