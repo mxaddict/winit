@@ -85,7 +85,11 @@ impl Default for LayerShellAttributes {
             anchor: Anchor::TOP | Anchor::LEFT | Anchor::RIGHT,
             exclusive_zone: -1,
             margin: (0, 0, 0, 0),
-            keyboard_interactivity: KeyboardInteractivity::Exclusive,
+            // OnDemand by default — compositors honor `Exclusive` strictly
+            // (it behaves like a lockscreen / login prompt and suppresses
+            // every compositor binding including window-close shortcuts).
+            // Callers like screen lockers can opt in explicitly.
+            keyboard_interactivity: KeyboardInteractivity::OnDemand,
             namespace: String::from("winit"),
             output: None,
         }
