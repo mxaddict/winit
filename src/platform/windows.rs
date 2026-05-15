@@ -1,10 +1,11 @@
 use std::{ffi::c_void, path::Path};
 
 use crate::{
-    dpi::PhysicalSize,
+    dpi::{PhysicalSize, Position},
     event::{DeviceId, KeyEvent},
     event_loop::EventLoopBuilder,
     keyboard::Key,
+    menu::Menu,
     monitor::MonitorHandle,
     platform::modifier_supplement::KeyEventExtModifierSupplement,
     platform_impl::WinIcon,
@@ -136,6 +137,8 @@ pub trait WindowExtWindows {
     ///
     /// Enabling the shadow causes a thin 1px line to appear on the top of the window.
     fn set_undecorated_shadow(&self, shadow: bool);
+
+    fn show_context_menu(&self, menu: Menu, position: Option<Position>);
 }
 
 impl WindowExtWindows for Window {
@@ -157,6 +160,10 @@ impl WindowExtWindows for Window {
     #[inline]
     fn set_undecorated_shadow(&self, shadow: bool) {
         self.window.set_undecorated_shadow(shadow)
+    }
+
+    fn show_context_menu(&self, menu: Menu, position: Option<Position>) {
+        self.window.show_context_menu(menu, position);
     }
 }
 

@@ -17,6 +17,7 @@ use super::{
     window::{get_ns_theme, WinitWindow},
     Fullscreen,
 };
+use crate::platform_impl::platform::window::position_traffic_lights;
 use crate::{
     dpi::{LogicalPosition, LogicalSize},
     event::{Event, WindowEvent},
@@ -333,6 +334,7 @@ declare_class!(
             if let Some(target_fullscreen) = target_fullscreen {
                 self.window.set_fullscreen(target_fullscreen);
             }
+            position_traffic_lights(&self.window);
         }
 
         /// Invoked when fail to enter fullscreen

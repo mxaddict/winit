@@ -14,7 +14,6 @@ use std::{ffi::CStr, mem::MaybeUninit, os::raw::*, sync::Mutex};
 use once_cell::sync::Lazy;
 use smol_str::SmolStr;
 
-use crate::cursor::CustomCursor;
 #[cfg(x11_platform)]
 use crate::platform::x11::XlibErrorHook;
 use crate::{
@@ -41,7 +40,6 @@ pub use x11::XNotSupported;
 #[cfg(x11_platform)]
 use x11::{util::WindowType as XWindowType, X11Error, XConnection, XError};
 
-pub(crate) use crate::cursor::CursorImage as PlatformCustomCursor;
 pub(crate) use crate::icon::RgbaIcon as PlatformIcon;
 pub(crate) use crate::platform_impl::Fullscreen;
 
@@ -424,11 +422,6 @@ impl Window {
     #[inline]
     pub fn set_cursor_icon(&self, cursor: CursorIcon) {
         x11_or_wayland!(match self; Window(w) => w.set_cursor_icon(cursor))
-    }
-
-    #[inline]
-    pub fn set_custom_cursor(&self, cursor: CustomCursor) {
-        x11_or_wayland!(match self; Window(w) => w.set_custom_cursor(cursor))
     }
 
     #[inline]
@@ -966,4 +959,22 @@ fn is_main_thread() -> bool {
 #[cfg(target_os = "netbsd")]
 fn is_main_thread() -> bool {
     std::thread::current().name() == Some("main")
+}
+
+pub struct Menu(usize);
+
+impl Menu {
+    pub fn new() -> Menu {
+        Menu(0)
+    }
+
+    pub fn new_for_popup() -> Menu {
+        Menu(0)
+    }
+
+    pub fn add_dropdown(&mut self, menu: Menu, text: &str, enabled: bool) {}
+
+    pub fn add_item(&mut self, id: u32, text: &str, selected: Option<bool>, enabled: bool) {}
+
+    pub fn add_separator(&mut self) {}
 }

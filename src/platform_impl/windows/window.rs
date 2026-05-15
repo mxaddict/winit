@@ -5,7 +5,8 @@ use std::{
     ffi::c_void,
     io,
     mem::{self, MaybeUninit},
-    panic, ptr,
+    panic,
+    ptr::{self, null},
     sync::{mpsc::channel, Arc, Mutex, MutexGuard},
 };
 
@@ -37,8 +38,8 @@ use windows_sys::Win32::{
             Touch::{RegisterTouchWindow, TWF_WANTPALM},
         },
         WindowsAndMessaging::{
-            CreateWindowExW, EnableMenuItem, FlashWindowEx, GetClientRect, GetCursorPos,
-            GetForegroundWindow, GetSystemMenu, GetSystemMetrics, GetWindowPlacement,
+            CreateWindowExW, DestroyMenu, EnableMenuItem, FlashWindowEx, GetClientRect,
+            GetCursorPos, GetForegroundWindow, GetSystemMenu, GetSystemMetrics, GetWindowPlacement,
             GetWindowTextLengthW, GetWindowTextW, IsWindowVisible, LoadCursorW, PeekMessageW,
             PostMessageW, RegisterClassExW, SetCursor, SetCursorPos, SetForegroundWindow,
             SetMenuDefaultItem, SetWindowDisplayAffinity, SetWindowPlacement, SetWindowPos,
@@ -55,10 +56,10 @@ use windows_sys::Win32::{
 };
 
 use crate::{
-    cursor::CustomCursor,
     dpi::{PhysicalPosition, PhysicalSize, Position, Size},
     error::{ExternalError, NotSupportedError, OsError as RootOsError},
     icon::Icon,
+    menu::Menu,
     platform_impl::platform::{
         dark_mode::try_theme,
         definitions::{
@@ -67,13 +68,13 @@ use crate::{
         dpi::{dpi_to_scale_factor, enable_non_client_dpi_scaling, hwnd_dpi},
         drop_handler::FileDropHandler,
         event_loop::{self, EventLoopWindowTarget, DESTROY_MSG_ID},
-        icon::{self, IconType, WinCursor},
+        icon::{self, IconType},
         ime::ImeContext,
         keyboard::KeyEventBuilder,
         monitor::{self, MonitorHandle},
         util,
         window_state::{CursorFlags, SavedWindow, WindowFlags, WindowState},
-        Fullscreen, PlatformSpecificWindowBuilderAttributes, SelectedCursor, WindowId,
+        Fullscreen, PlatformSpecificWindowBuilderAttributes, WindowId,
     },
     window::{
         CursorGrabMode, CursorIcon, ImePurpose, ResizeDirection, Theme, UserAttentionType,
@@ -397,25 +398,10 @@ impl Window {
 
     #[inline]
     pub fn set_cursor_icon(&self, cursor: CursorIcon) {
-        self.window_state_lock().mouse.selected_cursor = SelectedCursor::Named(cursor);
+        self.window_state_lock().mouse.cursor = cursor;
         self.thread_executor.execute_in_thread(move || unsafe {
             let cursor = LoadCursorW(0, util::to_windows_cursor(cursor));
             SetCursor(cursor);
-        });
-    }
-
-    #[inline]
-    pub fn set_custom_cursor(&self, cursor: CustomCursor) {
-        let new_cursor = match WinCursor::new(&cursor.inner) {
-            Ok(cursor) => cursor,
-            Err(err) => {
-                warn!("Failed to create custom cursor: {err}");
-                return;
-            }
-        };
-        self.window_state_lock().mouse.selected_cursor = SelectedCursor::Custom(new_cursor.clone());
-        self.thread_executor.execute_in_thread(move || unsafe {
-            SetCursor(new_cursor.as_raw_handle());
         });
     }
 
@@ -702,19 +688,9 @@ impl Window {
 
         let mut window_state_lock = window_state.lock().unwrap();
         let old_fullscreen = window_state_lock.fullscreen.clone();
-
-        match (&old_fullscreen, &fullscreen) {
-            // Return if we already are in the same fullscreen mode
-            _ if old_fullscreen == fullscreen => return,
-            // Return if saved Borderless(monitor) is the same as current monitor when requested fullscreen is Borderless(None)
-            (Some(Fullscreen::Borderless(Some(monitor))), Some(Fullscreen::Borderless(None)))
-                if *monitor == monitor::current_monitor(window.0) =>
-            {
-                return
-            }
-            _ => {}
+        if window_state_lock.fullscreen == fullscreen {
+            return;
         }
-
         window_state_lock.fullscreen = fullscreen.clone();
         drop(window_state_lock);
 
@@ -1057,6 +1033,28 @@ impl Window {
                 char_buff.len() as i32,
                 0,
             );
+        }
+    }
+
+    pub fn show_context_menu(&self, menu: Menu, position: Option<Position>) {
+        let hmenu = menu.into_inner().into_hmenu();
+        unsafe {
+            let pt = if let Some(pos) = position {
+                let scale_factor = self.scale_factor();
+                let pos = pos.to_physical::<i32>(scale_factor);
+                let mut pt = POINT {
+                    x: pos.x as _,
+                    y: pos.y as _,
+                };
+                ClientToScreen(self.hwnd(), &mut pt);
+                pt
+            } else {
+                let mut pt = POINT { x: 0, y: 0 };
+                GetCursorPos(&mut pt);
+                pt
+            };
+            TrackPopupMenu(hmenu, TPM_LEFTALIGN, pt.x, pt.y, 0, self.hwnd(), null());
+            DestroyMenu(hmenu);
         }
     }
 }

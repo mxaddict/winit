@@ -6,6 +6,61 @@ use objc2::sel;
 
 use super::appkit::{NSApp, NSEventModifierFlags, NSMenu, NSMenuItem};
 
+pub struct Menu(pub(crate) Id<NSMenu>);
+
+fn make_menu_item(id: u32, text: &str, selected: Option<bool>, enabled: bool) -> Id<NSMenuItem> {
+    let item = NSMenuItem::newWithTitle(
+        &NSString::from_str(text),
+        Some(sel!(handleMenuItem:)),
+        ns_string!(""),
+    );
+
+    item.setTag(id as isize);
+
+    if !enabled {
+        item.setEnabled(false);
+    }
+
+    if let Some(true) = selected {
+        item.setState(1_isize);
+    }
+    item
+}
+
+impl Menu {
+    pub fn new() -> Menu {
+        let menu = NSMenu::new();
+        // let () = msg_send![menu, setAutoenablesItems: NO];
+        Menu(menu)
+    }
+
+    pub fn new_for_popup() -> Menu {
+        // mac doesn't distinguish between application and context menu types.
+        Menu::new()
+    }
+
+    pub fn add_dropdown(&mut self, menu: Menu, text: &str, enabled: bool) {
+        let menu_item = NSMenuItem::new();
+        let title = NSString::from_str(text);
+        menu.0.setTitle(&title);
+        menu_item.setTitle(&title);
+        if !enabled {
+            menu_item.setEnabled(false);
+        }
+        menu_item.setSubmenu(&menu.0);
+        self.0.addItem(&menu_item);
+    }
+
+    pub fn add_item(&mut self, id: u32, text: &str, selected: Option<bool>, enabled: bool) {
+        let menu_item = make_menu_item(id, text, selected, enabled);
+        self.0.addItem(&menu_item);
+    }
+
+    pub fn add_separator(&mut self) {
+        self.0.addItem(&NSMenuItem::separatorItem());
+    }
+}
+
 struct KeyEquivalent<'a> {
     key: &'a NSString,
     masks: Option<NSEventModifierFlags>,

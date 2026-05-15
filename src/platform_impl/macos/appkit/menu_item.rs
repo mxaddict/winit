@@ -43,5 +43,17 @@ extern_methods!(
 
         #[method(setSubmenu:)]
         pub fn setSubmenu(&self, submenu: &NSMenu);
+
+        #[method(setEnabled:)]
+        pub fn setEnabled(&self, enabled: bool);
+
+        #[method(setTag:)]
+        pub fn setTag(&self, tag: isize);
+
+        #[method(setState:)]
+        pub fn setState(&self, state: isize);
+
+        #[method(setTitle:)]
+        pub fn setTitle(&self, title: &NSString);
     }
 );

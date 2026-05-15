@@ -13,6 +13,7 @@ use objc2::rc::{Id, WeakId};
 use objc2::runtime::{AnyObject, Sel};
 use objc2::{class, declare_class, msg_send, msg_send_id, mutability, sel, ClassType};
 
+use super::appkit::NSMenu;
 use super::{
     appkit::{
         NSApp, NSCursor, NSEvent, NSEventPhase, NSResponder, NSTextInputClient, NSTrackingRectTag,
@@ -20,6 +21,7 @@ use super::{
     },
     event::{code_to_key, code_to_location},
 };
+use crate::platform_impl::platform::window::position_traffic_lights;
 use crate::{
     dpi::{LogicalPosition, LogicalSize},
     event::{
@@ -118,6 +120,14 @@ fn get_left_modifier_code(key: &Key) -> KeyCode {
     }
 }
 
+pub struct MenuItemAction(Box<dyn Fn(isize)>);
+
+impl std::fmt::Debug for MenuItemAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("MenuItemAction")
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct ViewState {
     cursor_state: RefCell<CursorState>,
@@ -138,6 +148,8 @@ pub struct ViewState {
     /// to the application, even during IME
     forward_key_to_app: Cell<bool>,
 
+    context_menu: RefCell<Option<(Id<NSMenu>, NSPoint)>>,
+
     marked_text: RefCell<Id<NSMutableAttributedString>>,
     accepts_first_mouse: bool,
 }
@@ -145,7 +157,7 @@ pub struct ViewState {
 declare_class!(
     #[derive(Debug)]
     #[allow(non_snake_case)]
-    pub(super) struct WinitView {
+    pub(crate) struct WinitView {
         // Weak reference because the window keeps a strong reference to the view
         _ns_window: IvarDrop<Box<WeakId<WinitWindow>>, "__ns_window">,
         state: IvarDrop<Box<ViewState>, "_state">,
@@ -234,6 +246,7 @@ declare_class!(
             let logical_size = LogicalSize::new(rect.size.width as f64, rect.size.height as f64);
             let size = logical_size.to_physical::<u32>(self.scale_factor());
             self.queue_event(WindowEvent::Resized(size));
+            position_traffic_lights(&self.window());
         }
 
         #[method(drawRect:)]
@@ -276,6 +289,25 @@ declare_class!(
                 self.addCursorRect(bounds, &cursor_state.cursor);
             } else {
                 self.addCursorRect(bounds, &NSCursor::invisible());
+            }
+        }
+
+        #[method(showContextMenu:)]
+        fn show_context_menu(&self, _n: &AnyObject) {
+            if let Some((menu, position)) = self.state.context_menu.borrow_mut().take() {
+                menu.popUpMenuPositioningItem(
+                    std::ptr::null::<AnyObject>() as *mut _,
+                    position,
+                    self as *const Self as *mut _,
+                );
+            }
+        }
+
+        #[method(handleMenuItem:)]
+        fn handle_menu_item(&self, item: &AnyObject) {
+            unsafe {
+                let tag: isize = msg_send![item, tag];
+                self.queue_event(WindowEvent::MenuAction(tag as usize));
             }
         }
     }
@@ -856,6 +888,10 @@ impl WinitView {
     pub(super) fn set_cursor_icon(&self, icon: Id<NSCursor>) {
         let mut cursor_state = self.state.cursor_state.borrow_mut();
         cursor_state.cursor = icon;
+    }
+
+    pub(super) fn set_context_menu(&self, menu: Id<NSMenu>, position: NSPoint) {
+        *self.state.context_menu.borrow_mut() = Some((menu, position));
     }
 
     /// Set whether the cursor should be visible or not.

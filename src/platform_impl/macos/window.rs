@@ -7,7 +7,9 @@ use std::os::raw::c_void;
 use std::ptr::NonNull;
 use std::sync::{Mutex, MutexGuard};
 
-use crate::cursor::CustomCursor;
+use objc2::ffi::NO;
+use objc2::runtime::AnyObject;
+
 use crate::{
     dpi::{
         LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize, Position, Size, Size::Logical,
@@ -119,12 +121,14 @@ pub struct PlatformSpecificWindowBuilderAttributes {
     pub title_hidden: bool,
     pub titlebar_hidden: bool,
     pub titlebar_buttons_hidden: bool,
+    pub movable: bool,
     pub fullsize_content_view: bool,
     pub disallow_hidpi: bool,
     pub has_shadow: bool,
     pub accepts_first_mouse: bool,
     pub tabbing_identifier: Option<String>,
     pub option_as_alt: OptionAsAlt,
+    pub traffic_lights_offset: Option<(f64, f64)>,
 }
 
 impl Default for PlatformSpecificWindowBuilderAttributes {
@@ -137,11 +141,13 @@ impl Default for PlatformSpecificWindowBuilderAttributes {
             titlebar_hidden: false,
             titlebar_buttons_hidden: false,
             fullsize_content_view: false,
+            movable: true,
             disallow_hidpi: false,
             has_shadow: true,
             accepts_first_mouse: true,
             tabbing_identifier: None,
             option_as_alt: Default::default(),
+            traffic_lights_offset: None,
         }
     }
 }
@@ -242,6 +248,8 @@ pub struct SharedState {
     pub(crate) option_as_alt: OptionAsAlt,
 
     decorations: bool,
+
+    traffic_lights_offset: Option<(f64, f64)>,
 }
 
 impl SharedState {
@@ -370,6 +378,7 @@ impl WinitWindow {
                 resizable: attrs.resizable,
                 maximized: attrs.maximized,
                 decorations: attrs.decorations,
+                traffic_lights_offset: pl_attrs.traffic_lights_offset,
                 ..Default::default()
             };
 
@@ -414,6 +423,9 @@ impl WinitWindow {
             }
             if pl_attrs.title_hidden {
                 this.setTitleVisibility(NSWindowTitleVisibility::Hidden);
+            }
+            if !pl_attrs.movable {
+                this.setMovable(false);
             }
             if pl_attrs.titlebar_buttons_hidden {
                 for titlebar_button in &[
@@ -551,6 +563,7 @@ impl WinitWindow {
         if attrs.maximized {
             this.set_maximized(attrs.maximized);
         }
+        position_traffic_lights(&this);
 
         Ok((this, delegate))
     }
@@ -582,7 +595,8 @@ impl WinitWindow {
     }
 
     pub fn set_title(&self, title: &str) {
-        self.setTitle(&NSString::from_str(title))
+        self.setTitle(&NSString::from_str(title));
+        position_traffic_lights(self);
     }
 
     pub fn set_transparent(&self, transparent: bool) {
@@ -832,13 +846,6 @@ impl WinitWindow {
     pub fn set_cursor_icon(&self, icon: CursorIcon) {
         let view = self.view();
         view.set_cursor_icon(NSCursor::from_icon(icon));
-        self.invalidateCursorRectsForView(&view);
-    }
-
-    #[inline]
-    pub fn set_custom_cursor(&self, cursor: CustomCursor) {
-        let view = self.view();
-        view.set_cursor_icon(NSCursor::from_image(&cursor.inner));
         self.invalidateCursorRectsForView(&view);
     }
 
@@ -1595,6 +1602,27 @@ impl WindowExtMacOS for WinitWindow {
         let shared_state_lock = self.lock_shared_state("option_as_alt");
         shared_state_lock.option_as_alt
     }
+
+    fn show_context_menu(&self, menu: crate::menu::Menu, position: Option<Position>) {
+        unsafe {
+            let scale = self.scale_factor();
+            let position = if let Some(pos) = position.map(|p| p.to_logical(scale)) {
+                let view_rect: NSRect = self.view().frame();
+                NSPoint::new(pos.x, view_rect.size.height - pos.y)
+            } else {
+                let mouse_location = self.mouseLocationOutsideOfEventStream();
+                let pos = Position::Logical(LogicalPosition {
+                    x: mouse_location.x,
+                    y: mouse_location.y,
+                });
+                let pos = pos.to_logical(scale);
+                NSPoint::new(pos.x, pos.y)
+            };
+            self.view().set_context_menu(menu.into_inner().0, position);
+            let view: *mut WinitView = Id::as_ptr(&self.view()) as *mut _;
+            let () = msg_send![view as *mut _, performSelectorOnMainThread: sel!(showContextMenu:) withObject: std::ptr::null::<AnyObject>() waitUntilDone: NO];
+        }
+    }
 }
 
 pub(super) fn get_ns_theme() -> Theme {
@@ -1627,4 +1655,32 @@ fn set_ns_theme(theme: Option<Theme>) {
         });
         app.setAppearance(appearance.as_ref().map(|a| a.as_ref()));
     }
+}
+
+pub(super) fn position_traffic_lights(window: &WinitWindow) -> Option<()> {
+    let offset = { window.shared_state.lock().ok()?.traffic_lights_offset? };
+
+    let close = window.standardWindowButton(NSWindowButton::Close)?;
+    let miniaturize = window.standardWindowButton(NSWindowButton::Miniaturize)?;
+    let zoom = window.standardWindowButton(NSWindowButton::Zoom)?;
+
+    let superview: &mut NSView = unsafe { msg_send![&close, superview] };
+    let title_bar_container_view: &mut NSView = unsafe { msg_send![superview, superview] };
+
+    let close_rect = close.frame();
+    let title_bar_frame_height = close_rect.size.height + offset.1;
+    let mut title_bar_rect = NSView::frame(title_bar_container_view);
+    title_bar_rect.size.height = title_bar_frame_height;
+    title_bar_rect.origin.y = window.frame().size.height - title_bar_frame_height;
+    title_bar_container_view.setFrame(title_bar_rect);
+
+    let space_between = miniaturize.frame().origin.x - close_rect.origin.x;
+    let window_buttons = vec![close, miniaturize, zoom];
+
+    for (i, button) in window_buttons.into_iter().enumerate() {
+        let mut rect = button.frame();
+        rect.origin.x = offset.0 + (i as f64 * space_between);
+        button.setFrameOrigin(rect.origin);
+    }
+    Some(())
 }

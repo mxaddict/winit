@@ -10,13 +10,12 @@ pub(crate) use self::{
     event_loop::{
         EventLoop, EventLoopProxy, EventLoopWindowTarget, PlatformSpecificEventLoopAttributes,
     },
-    icon::{SelectedCursor, WinIcon},
+    icon::WinIcon,
     monitor::{MonitorHandle, VideoMode},
     window::Window,
 };
 
 pub use self::icon::WinIcon as PlatformIcon;
-pub(crate) use crate::cursor::CursorImage as PlatformCustomCursor;
 use crate::platform_impl::Fullscreen;
 
 use crate::event::DeviceId as RootDeviceId;
@@ -175,6 +174,8 @@ unsafe fn set_window_long(hwnd: HWND, nindex: WINDOW_LONG_PTR_INDEX, dwnewlong: 
     };
 }
 
+pub use menu::Menu;
+
 #[macro_use]
 mod util;
 mod dark_mode;
@@ -186,6 +187,7 @@ mod icon;
 mod ime;
 mod keyboard;
 mod keyboard_layout;
+mod menu;
 mod monitor;
 mod raw_input;
 mod window;

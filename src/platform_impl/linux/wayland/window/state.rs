@@ -1,7 +1,7 @@
 //! The state of the window, which is shared with the event-loop.
 
 use std::num::NonZeroU32;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use log::{info, warn};
@@ -18,23 +18,20 @@ use sctk::reexports::protocols::wp::text_input::zv3::client::zwp_text_input_v3::
 use sctk::reexports::protocols::wp::viewporter::client::wp_viewport::WpViewport;
 use sctk::reexports::protocols::xdg::shell::client::xdg_toplevel::ResizeEdge as XdgResizeEdge;
 
-use sctk::compositor::{CompositorState, Region, SurfaceData, SurfaceDataExt};
-use sctk::seat::pointer::{PointerDataExt, ThemedPointer};
+use sctk::compositor::{CompositorState, Region};
+use sctk::seat::pointer::ThemedPointer;
 use sctk::shell::xdg::window::{DecorationMode, Window, WindowConfigure};
 use sctk::shell::xdg::XdgSurface;
 use sctk::shell::WaylandSurface;
-use sctk::shm::slot::SlotPool;
 use sctk::shm::Shm;
 use sctk::subcompositor::SubcompositorState;
 use wayland_protocols_plasma::blur::client::org_kde_kwin_blur::OrgKdeKwinBlur;
 
-use crate::cursor::CustomCursor as RootCustomCursor;
 use crate::dpi::{LogicalPosition, LogicalSize, PhysicalSize, Size};
 use crate::error::{ExternalError, NotSupportedError};
 use crate::event::WindowEvent;
 use crate::platform_impl::wayland::event_loop::sink::EventSink;
 use crate::platform_impl::wayland::make_wid;
-use crate::platform_impl::wayland::types::cursor::{CustomCursor, SelectedCursor};
 use crate::platform_impl::wayland::types::kwin_blur::KWinBlurManager;
 use crate::platform_impl::WindowId;
 use crate::window::{CursorGrabMode, CursorIcon, ImePurpose, ResizeDirection, Theme};
@@ -63,16 +60,14 @@ pub struct WindowState {
     /// The `Shm` to set cursor.
     pub shm: WlShm,
 
-    // A shared pool where to allocate custom cursors.
-    custom_cursor_pool: Arc<Mutex<SlotPool>>,
-
     /// The last received configure.
     pub last_configure: Option<WindowConfigure>,
 
     /// The pointers observed on the window.
     pub pointers: Vec<Weak<ThemedPointer<WinitPointerData>>>,
 
-    selected_cursor: SelectedCursor,
+    /// Cursor icon.
+    pub cursor_icon: CursorIcon,
 
     /// Wether the cursor is visible.
     pub cursor_visible: bool,
@@ -183,7 +178,7 @@ impl WindowState {
             connection,
             csd_fails: false,
             cursor_grab_mode: GrabState::new(),
-            selected_cursor: Default::default(),
+            cursor_icon: CursorIcon::Default,
             cursor_visible: true,
             decorate: true,
             fractional_scale,
@@ -202,7 +197,6 @@ impl WindowState {
             resizable: true,
             scale_factor: 1.,
             shm: winit_state.shm.wl_shm().clone(),
-            custom_cursor_pool: winit_state.custom_cursor_pool.clone(),
             size: initial_size.to_logical(1.),
             stateless_size: initial_size.to_logical(1.),
             initial_size: Some(initial_size),
@@ -260,9 +254,9 @@ impl WindowState {
         &mut self,
         configure: WindowConfigure,
         shm: &Shm,
-        subcompositor: &Option<Arc<SubcompositorState>>,
+        subcompositor: &Arc<SubcompositorState>,
         event_sink: &mut EventSink,
-    ) -> Option<LogicalSize<u32>> {
+    ) -> LogicalSize<u32> {
         // NOTE: when using fractional scaling or wl_compositor@v6 the scaling
         // should be delivered before the first configure, thus apply it to
         // properly scale the physical sizes provided by the users.
@@ -271,16 +265,13 @@ impl WindowState {
             self.stateless_size = self.size;
         }
 
-        if let Some(subcompositor) = subcompositor.as_ref().filter(|_| {
-            configure.decoration_mode == DecorationMode::Client
-                && self.frame.is_none()
-                && !self.csd_fails
-        }) {
+        if configure.decoration_mode == DecorationMode::Client
+            && self.frame.is_none()
+            && !self.csd_fails
+        {
             match WinitFrame::new(
                 &self.window,
                 shm,
-                #[cfg(feature = "sctk-adwaita")]
-                self.compositor.clone(),
                 subcompositor.clone(),
                 self.queue_handle.clone(),
                 #[cfg(feature = "sctk-adwaita")]
@@ -325,9 +316,14 @@ impl WindowState {
             match configure.new_size {
                 (Some(width), Some(height)) => {
                     let (width, height) = frame.subtract_borders(width, height);
-                    let width = width.map(|w| w.get()).unwrap_or(1);
-                    let height = height.map(|h| h.get()).unwrap_or(1);
-                    ((width, height).into(), false)
+                    (
+                        (
+                            width.map(|w| w.get()).unwrap_or(1),
+                            height.map(|h| h.get()).unwrap_or(1),
+                        )
+                            .into(),
+                        false,
+                    )
                 }
                 (_, _) if stateless => (self.stateless_size, true),
                 _ => (self.size, true),
@@ -353,31 +349,13 @@ impl WindowState {
                 .unwrap_or(new_size.height);
         }
 
-        let new_state = configure.state;
-        let old_state = self
-            .last_configure
-            .as_ref()
-            .map(|configure| configure.state);
-
-        let state_change_requires_resize = old_state
-            .map(|old_state| {
-                !old_state
-                    .symmetric_difference(new_state)
-                    .difference(XdgWindowState::ACTIVATED | XdgWindowState::SUSPENDED)
-                    .is_empty()
-            })
-            // NOTE: `None` is present for the initial configure, thus we must always resize.
-            .unwrap_or(true);
-
-        // NOTE: Set the configure before doing a resize, since we query it during it.
+        // XXX Set the configure before doing a resize.
         self.last_configure = Some(configure);
 
-        if state_change_requires_resize || new_size != self.inner_size() {
-            self.resize(new_size);
-            Some(new_size)
-        } else {
-            None
-        }
+        // XXX Update the new size right away.
+        self.resize(new_size);
+
+        new_size
     }
 
     /// Compute the bounds for the inner size of the surface.
@@ -622,10 +600,7 @@ impl WindowState {
     /// Reload the cursor style on the given window.
     pub fn reload_cursor_style(&mut self) {
         if self.cursor_visible {
-            match &self.selected_cursor {
-                SelectedCursor::Named(icon) => self.set_cursor(*icon),
-                SelectedCursor::Custom(cursor) => self.apply_custom_cursor(cursor),
-            }
+            self.set_cursor(self.cursor_icon);
         } else {
             self.set_cursor_visible(self.cursor_visible);
         }
@@ -711,8 +686,10 @@ impl WindowState {
     }
 
     /// Set the cursor icon.
+    ///
+    /// Providing `None` will hide the cursor.
     pub fn set_cursor(&mut self, cursor_icon: CursorIcon) {
-        self.selected_cursor = SelectedCursor::Named(cursor_icon);
+        self.cursor_icon = cursor_icon;
 
         if !self.cursor_visible {
             return;
@@ -723,54 +700,6 @@ impl WindowState {
                 warn!("Failed to set cursor to {:?}", cursor_icon);
             }
         })
-    }
-
-    /// Set the custom cursor icon.
-    pub fn set_custom_cursor(&mut self, cursor: RootCustomCursor) {
-        let cursor = {
-            let mut pool = self.custom_cursor_pool.lock().unwrap();
-            CustomCursor::new(&mut pool, &cursor.inner)
-        };
-
-        if self.cursor_visible {
-            self.apply_custom_cursor(&cursor);
-        }
-
-        self.selected_cursor = SelectedCursor::Custom(cursor);
-    }
-
-    fn apply_custom_cursor(&self, cursor: &CustomCursor) {
-        self.apply_on_poiner(|pointer, _| {
-            let surface = pointer.surface();
-
-            let scale = surface
-                .data::<SurfaceData>()
-                .unwrap()
-                .surface_data()
-                .scale_factor();
-
-            surface.set_buffer_scale(scale);
-            surface.attach(Some(cursor.buffer.wl_buffer()), 0, 0);
-            if surface.version() >= 4 {
-                surface.damage_buffer(0, 0, cursor.w, cursor.h);
-            } else {
-                surface.damage(0, 0, cursor.w / scale, cursor.h / scale);
-            }
-            surface.commit();
-
-            let serial = pointer
-                .pointer()
-                .data::<WinitPointerData>()
-                .and_then(|data| data.pointer_data().latest_enter_serial())
-                .unwrap();
-
-            pointer.pointer().set_cursor(
-                serial,
-                Some(surface),
-                cursor.hotspot_x / scale,
-                cursor.hotspot_y / scale,
-            );
-        });
     }
 
     /// Set maximum inner window size.
@@ -907,10 +836,7 @@ impl WindowState {
         self.cursor_visible = cursor_visible;
 
         if self.cursor_visible {
-            match &self.selected_cursor {
-                SelectedCursor::Named(icon) => self.set_cursor(*icon),
-                SelectedCursor::Custom(cursor) => self.apply_custom_cursor(cursor),
-            }
+            self.set_cursor(self.cursor_icon);
         } else {
             for pointer in self.pointers.iter().filter_map(|pointer| pointer.upgrade()) {
                 let latest_enter_serial = pointer.pointer().winit_data().latest_enter_serial();
@@ -983,7 +909,7 @@ impl WindowState {
 
     /// Set the IME position.
     pub fn set_ime_cursor_area(&self, position: LogicalPosition<u32>, size: LogicalSize<u32>) {
-        // FIXME: This won't fly unless user will have a way to request IME window per seat, since
+        // XXX This won't fly unless user will have a way to request IME window per seat, since
         // the ime windows will be overlapping, but winit doesn't expose API to specify for
         // which seat we're setting IME position.
         let (x, y) = (position.x as i32, position.y as i32);
@@ -1014,7 +940,7 @@ impl WindowState {
     pub fn set_scale_factor(&mut self, scale_factor: f64) {
         self.scale_factor = scale_factor;
 
-        // NOTE: When fractional scaling is not used update the buffer scale.
+        // XXX when fractional scaling is not used update the buffer scale.
         if self.fractional_scale.is_none() {
             let _ = self.window.set_buffer_scale(self.scale_factor as _);
         }
@@ -1162,7 +1088,7 @@ impl From<ResizeDirection> for XdgResizeEdge {
     }
 }
 
-// NOTE: Rust doesn't allow `From<Option<Theme>>`.
+// XXX rust doesn't allow from `Option`.
 #[cfg(feature = "sctk-adwaita")]
 fn into_sctk_adwaita_config(theme: Option<Theme>) -> sctk_adwaita::FrameConfig {
     match theme {

@@ -3,7 +3,9 @@ use std::os::raw::c_void;
 use objc2::rc::Id;
 
 use crate::{
+    dpi::Position,
     event_loop::{EventLoopBuilder, EventLoopWindowTarget},
+    menu::Menu,
     monitor::MonitorHandle,
     window::{Window, WindowBuilder},
 };
@@ -79,6 +81,8 @@ pub trait WindowExtMacOS {
 
     /// Getter for the [`WindowExtMacOS::set_option_as_alt`].
     fn option_as_alt(&self) -> OptionAsAlt;
+
+    fn show_context_menu(&self, menu: Menu, position: Option<Position>);
 }
 
 impl WindowExtMacOS for Window {
@@ -157,6 +161,11 @@ impl WindowExtMacOS for Window {
     fn option_as_alt(&self) -> OptionAsAlt {
         self.window.maybe_wait_on_main(|w| w.option_as_alt())
     }
+
+    fn show_context_menu(&self, menu: Menu, position: Option<Position>) {
+        self.window
+            .maybe_queue_on_main(move |w| w.show_context_menu(menu, position))
+    }
 }
 
 /// Corresponds to `NSApplicationActivationPolicy`.
@@ -196,6 +205,8 @@ pub trait WindowBuilderExtMacOS {
     fn with_fullsize_content_view(self, fullsize_content_view: bool) -> Self;
     fn with_disallow_hidpi(self, disallow_hidpi: bool) -> Self;
     fn with_has_shadow(self, has_shadow: bool) -> Self;
+    fn with_movable(self, movable: bool) -> Self;
+    fn with_traffic_lights_offset(self, x: f64, y: f64) -> Self;
     /// Window accepts click-through mouse events.
     fn with_accepts_first_mouse(self, accepts_first_mouse: bool) -> Self;
     /// Defines the window tabbing identifier.
@@ -236,6 +247,18 @@ impl WindowBuilderExtMacOS for WindowBuilder {
     #[inline]
     fn with_title_hidden(mut self, title_hidden: bool) -> Self {
         self.platform_specific.title_hidden = title_hidden;
+        self
+    }
+
+    #[inline]
+    fn with_movable(mut self, movable: bool) -> Self {
+        self.platform_specific.movable = movable;
+        self
+    }
+
+    #[inline]
+    fn with_traffic_lights_offset(mut self, x: f64, y: f64) -> Self {
+        self.platform_specific.traffic_lights_offset = Some((x, y));
         self
     }
 

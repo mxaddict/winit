@@ -19,7 +19,6 @@ use sctk::seat::SeatState;
 use sctk::shell::xdg::window::{Window, WindowConfigure, WindowHandler};
 use sctk::shell::xdg::XdgShell;
 use sctk::shell::WaylandSurface;
-use sctk::shm::slot::SlotPool;
 use sctk::shm::{Shm, ShmHandler};
 use sctk::subcompositor::SubcompositorState;
 
@@ -51,16 +50,13 @@ pub struct WinitState {
     pub compositor_state: Arc<CompositorState>,
 
     /// The state of the subcompositor.
-    pub subcompositor_state: Option<Arc<SubcompositorState>>,
+    pub subcompositor_state: Arc<SubcompositorState>,
 
     /// The seat state responsible for all sorts of input.
     pub seat_state: SeatState,
 
     /// The shm for software buffers, such as cursors.
     pub shm: Shm,
-
-    /// The pool where custom cursors are allocated.
-    pub custom_cursor_pool: Arc<Mutex<SlotPool>>,
 
     /// The XDG shell that is used for widnows.
     pub xdg_shell: XdgShell,
@@ -128,17 +124,12 @@ impl WinitState {
         let registry_state = RegistryState::new(globals);
         let compositor_state =
             CompositorState::bind(globals, queue_handle).map_err(WaylandError::Bind)?;
-        let subcompositor_state = match SubcompositorState::bind(
+        let subcompositor_state = SubcompositorState::bind(
             compositor_state.wl_compositor().clone(),
             globals,
             queue_handle,
-        ) {
-            Ok(c) => Some(c),
-            Err(e) => {
-                warn!("Subcompositor protocol not available, ignoring CSD: {e:?}");
-                None
-            }
-        };
+        )
+        .map_err(WaylandError::Bind)?;
 
         let output_state = OutputState::new(globals, queue_handle);
         let monitors = output_state.outputs().map(MonitorHandle::new).collect();
@@ -157,17 +148,13 @@ impl WinitState {
                 (None, None)
             };
 
-        let shm = Shm::bind(globals, queue_handle).map_err(WaylandError::Bind)?;
-        let custom_cursor_pool = Arc::new(Mutex::new(SlotPool::new(2, &shm).unwrap()));
-
         Ok(Self {
             registry_state,
             compositor_state: Arc::new(compositor_state),
-            subcompositor_state: subcompositor_state.map(Arc::new),
+            subcompositor_state: Arc::new(subcompositor_state),
             output_state,
             seat_state,
-            shm,
-            custom_cursor_pool,
+            shm: Shm::bind(globals, queue_handle).map_err(WaylandError::Bind)?,
 
             xdg_shell: XdgShell::bind(globals, queue_handle).map_err(WaylandError::Bind)?,
             xdg_activation: XdgActivationState::bind(globals, queue_handle).ok(),
@@ -307,11 +294,7 @@ impl WindowHandler for WinitState {
                 &mut self.events_sink,
             );
 
-        // NOTE: Only update when the value is `Some` to not override consequent configures with
-        // the same sizes.
-        if new_size.is_some() {
-            self.window_compositor_updates[pos].size = new_size;
-        }
+        self.window_compositor_updates[pos].size = Some(new_size);
     }
 }
 

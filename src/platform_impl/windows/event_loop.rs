@@ -56,7 +56,7 @@ use windows_sys::Win32::{
             HTCAPTION, HTCLIENT, MINMAXINFO, MNC_CLOSE, MSG, NCCALCSIZE_PARAMS, PM_REMOVE, PT_PEN,
             PT_TOUCH, RI_KEY_E0, RI_KEY_E1, RI_MOUSE_HWHEEL, RI_MOUSE_WHEEL, SC_MINIMIZE,
             SC_RESTORE, SIZE_MAXIMIZED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-            WHEEL_DELTA, WINDOWPOS, WM_CAPTURECHANGED, WM_CLOSE, WM_CREATE, WM_DESTROY,
+            WHEEL_DELTA, WINDOWPOS, WM_CAPTURECHANGED, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_DESTROY,
             WM_DPICHANGED, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_IME_COMPOSITION,
             WM_IME_ENDCOMPOSITION, WM_IME_SETCONTEXT, WM_IME_STARTCOMPOSITION, WM_INPUT,
             WM_INPUT_DEVICE_CHANGE, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDOWN,
@@ -101,7 +101,7 @@ use runner::{EventLoopRunner, EventLoopRunnerShared};
 
 use self::runner::RunnerState;
 
-use super::{window::set_skip_taskbar, SelectedCursor};
+use super::window::set_skip_taskbar;
 
 type GetPointerFrameInfoHistory = unsafe extern "system" fn(
     pointerId: u32,
@@ -1595,11 +1595,36 @@ unsafe fn public_window_callback_inner<T: 'static>(
         }
 
         WM_LBUTTONDOWN => {
-            use crate::event::{ElementState::Pressed, MouseButton::Left, WindowEvent::MouseInput};
+            use crate::event::{
+                ElementState::Pressed, MouseButton::Left, WindowEvent::CursorMoved,
+                WindowEvent::MouseInput,
+            };
 
             unsafe { capture_mouse(window, &mut userdata.window_state_lock()) };
 
             update_modifiers(window, userdata);
+
+            let x = super::get_x_lparam(lparam as u32) as f64;
+            let y = super::get_y_lparam(lparam as u32) as f64;
+            let position = PhysicalPosition::new(x, y);
+            let cursor_moved;
+            {
+                // handle spurious WM_MOUSEMOVE messages
+                // see https://devblogs.microsoft.com/oldnewthing/20031001-00/?p=42343
+                // and http://debugandconquer.blogspot.com/2015/08/the-cause-of-spurious-mouse-move.html
+                let mut w = userdata.window_state_lock();
+                cursor_moved = w.mouse.last_position != Some(position);
+                w.mouse.last_position = Some(position);
+            }
+            if cursor_moved {
+                userdata.send_event(Event::WindowEvent {
+                    window_id: RootWindowId(WindowId(window)),
+                    event: CursorMoved {
+                        device_id: DEVICE_ID,
+                        position,
+                    },
+                });
+            }
 
             userdata.send_event(Event::WindowEvent {
                 window_id: RootWindowId(WindowId(window)),
@@ -1634,12 +1659,35 @@ unsafe fn public_window_callback_inner<T: 'static>(
 
         WM_RBUTTONDOWN => {
             use crate::event::{
-                ElementState::Pressed, MouseButton::Right, WindowEvent::MouseInput,
+                ElementState::Pressed, MouseButton::Right, WindowEvent::CursorMoved,
+                WindowEvent::MouseInput,
             };
 
             unsafe { capture_mouse(window, &mut userdata.window_state_lock()) };
 
             update_modifiers(window, userdata);
+
+            let x = super::get_x_lparam(lparam as u32) as f64;
+            let y = super::get_y_lparam(lparam as u32) as f64;
+            let position = PhysicalPosition::new(x, y);
+            let cursor_moved;
+            {
+                // handle spurious WM_MOUSEMOVE messages
+                // see https://devblogs.microsoft.com/oldnewthing/20031001-00/?p=42343
+                // and http://debugandconquer.blogspot.com/2015/08/the-cause-of-spurious-mouse-move.html
+                let mut w = userdata.window_state_lock();
+                cursor_moved = w.mouse.last_position != Some(position);
+                w.mouse.last_position = Some(position);
+            }
+            if cursor_moved {
+                userdata.send_event(Event::WindowEvent {
+                    window_id: RootWindowId(WindowId(window)),
+                    event: CursorMoved {
+                        device_id: DEVICE_ID,
+                        position,
+                    },
+                });
+            }
 
             userdata.send_event(Event::WindowEvent {
                 window_id: RootWindowId(WindowId(window)),
@@ -2011,21 +2059,16 @@ unsafe fn public_window_callback_inner<T: 'static>(
                 // `WM_MOUSEMOVE` seems to come after `WM_SETCURSOR` for a given cursor movement.
                 let in_client_area = super::loword(lparam as u32) as u32 == HTCLIENT;
                 if in_client_area {
-                    Some(window_state.mouse.selected_cursor.clone())
+                    Some(window_state.mouse.cursor)
                 } else {
                     None
                 }
             };
 
             match set_cursor_to {
-                Some(selected_cursor) => {
-                    let hcursor = match selected_cursor {
-                        SelectedCursor::Named(cursor_icon) => unsafe {
-                            LoadCursorW(0, util::to_windows_cursor(cursor_icon))
-                        },
-                        SelectedCursor::Custom(cursor) => cursor.as_raw_handle(),
-                    };
-                    unsafe { SetCursor(hcursor) };
+                Some(cursor) => {
+                    let cursor = unsafe { LoadCursorW(0, util::to_windows_cursor(cursor)) };
+                    unsafe { SetCursor(cursor) };
                     result = ProcResult::Value(0);
                 }
                 None => result = ProcResult::DefWindowProc(wparam),
@@ -2298,6 +2341,15 @@ unsafe fn public_window_callback_inner<T: 'static>(
                 }
             }
             result = ProcResult::DefWindowProc(wparam);
+        }
+
+        WM_COMMAND => {
+            use crate::event::WindowEvent::MenuAction;
+            let id = super::loword(wparam as u32) as u32;
+            userdata.send_event(Event::WindowEvent {
+                window_id: RootWindowId(WindowId(window)),
+                event: MenuAction(id as usize),
+            });
         }
 
         _ => {

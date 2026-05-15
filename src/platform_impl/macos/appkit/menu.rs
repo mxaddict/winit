@@ -1,8 +1,9 @@
-use icrate::Foundation::NSObject;
+use icrate::Foundation::{NSObject, NSPoint, NSString};
+use objc2::ffi::BOOL;
 use objc2::rc::Id;
 use objc2::{extern_class, extern_methods, mutability, ClassType};
 
-use super::NSMenuItem;
+use super::{NSMenuItem, NSView};
 
 extern_class!(
     #[derive(Debug, PartialEq, Eq, Hash)]
@@ -14,6 +15,9 @@ extern_class!(
     }
 );
 
+unsafe impl Send for NSMenu {}
+unsafe impl Sync for NSMenu {}
+
 extern_methods!(
     unsafe impl NSMenu {
         #[method_id(new)]
@@ -21,5 +25,16 @@ extern_methods!(
 
         #[method(addItem:)]
         pub fn addItem(&self, item: &NSMenuItem);
+
+        #[method(setTitle:)]
+        pub fn setTitle(&self, title: &NSString);
+
+        #[method(popUpMenuPositioningItem:atLocation:inView:)]
+        pub fn popUpMenuPositioningItem(
+            &self,
+            item: *mut NSMenuItem,
+            location: NSPoint,
+            inView: *mut NSView,
+        ) -> BOOL;
     }
 );

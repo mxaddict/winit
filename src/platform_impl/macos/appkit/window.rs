@@ -42,6 +42,9 @@ extern_methods!(
         #[method(backingScaleFactor)]
         pub(crate) fn backingScaleFactor(&self) -> CGFloat;
 
+        #[method(mouseLocationOutsideOfEventStream)]
+        pub(crate) fn mouseLocationOutsideOfEventStream(&self) -> NSPoint;
+
         #[method_id(contentView)]
         pub(crate) fn contentView(&self) -> Id<NSView>;
 

@@ -1,5 +1,5 @@
 use std::cell::Cell;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::sync::{Arc, Mutex};
 
 use smol_str::SmolStr;
@@ -18,10 +18,11 @@ use crate::window::{WindowAttributes, WindowId as RootWindowId};
 use super::super::WindowId;
 use super::animation_frame::AnimationFrameHandler;
 use super::event_handle::EventListenerHandle;
+use super::fullscreen::FullscreenHandler;
 use super::intersection_handle::IntersectionObserverHandle;
 use super::media_query_handle::MediaQueryListHandle;
 use super::pointer::PointerHandler;
-use super::{event, fullscreen, ButtonsState, ResizeScaleHandle};
+use super::{event, ButtonsState, ResizeScaleHandle};
 
 #[allow(dead_code)]
 pub struct Canvas {
@@ -51,9 +52,10 @@ pub struct Common {
     style: Style,
     old_size: Rc<Cell<PhysicalSize<u32>>>,
     current_size: Rc<Cell<PhysicalSize<u32>>>,
+    fullscreen_handler: Rc<FullscreenHandler>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Style {
     read: CssStyleDeclaration,
     write: CssStyleDeclaration,
@@ -103,6 +105,7 @@ impl Canvas {
             style,
             old_size: Rc::default(),
             current_size: Rc::default(),
+            fullscreen_handler: Rc::new(FullscreenHandler::new(document.clone(), canvas.clone())),
         };
 
         if let Some(size) = attr.inner_size {
@@ -126,7 +129,7 @@ impl Canvas {
         }
 
         if attr.fullscreen.0.is_some() {
-            fullscreen::request_fullscreen(&document, &canvas);
+            common.fullscreen_handler.request_fullscreen();
         }
 
         if attr.active {
@@ -278,7 +281,7 @@ impl Canvas {
     where
         F: 'static + FnMut(PhysicalKey, Key, Option<SmolStr>, KeyLocation, bool, ModifiersState),
     {
-        self.on_keyboard_press = Some(self.common.add_event(
+        self.on_keyboard_press = Some(self.common.add_transient_event(
             "keydown",
             move |event: KeyboardEvent| {
                 if prevent_default {
@@ -438,16 +441,20 @@ impl Canvas {
         self.animation_frame_handler.on_animation_frame(f)
     }
 
+    pub(crate) fn on_touch_end(&mut self) {
+        self.on_touch_end = Some(self.common.add_transient_event("touchend", |_| {}));
+    }
+
     pub fn request_fullscreen(&self) {
-        fullscreen::request_fullscreen(self.document(), self.raw());
+        self.common.fullscreen_handler.request_fullscreen()
     }
 
     pub fn exit_fullscreen(&self) {
-        fullscreen::exit_fullscreen(self.document(), self.raw());
+        self.common.fullscreen_handler.exit_fullscreen()
     }
 
     pub fn is_fullscreen(&self) -> bool {
-        fullscreen::is_fullscreen(self.document(), self.raw())
+        self.common.fullscreen_handler.is_fullscreen()
     }
 
     pub fn request_animation_frame(&self) {
@@ -498,6 +505,10 @@ impl Canvas {
         }
     }
 
+    pub(crate) fn transient_activation(&self) {
+        self.common.fullscreen_handler.transient_activation()
+    }
+
     pub fn remove_listeners(&mut self) {
         self.on_touch_start = None;
         self.on_focus = None;
@@ -511,6 +522,7 @@ impl Canvas {
         self.on_intersect = None;
         self.animation_frame_handler.cancel();
         self.on_touch_end = None;
+        self.common.fullscreen_handler.cancel();
     }
 }
 
@@ -525,6 +537,29 @@ impl Common {
         F: 'static + FnMut(E),
     {
         EventListenerHandle::new(self.raw.clone(), event_name, Closure::new(handler))
+    }
+
+    // The difference between add_event and add_user_event is that the latter has a special meaning
+    // for browser security. A user event is a deliberate action by the user (like a mouse or key
+    // press) and is the only time things like a fullscreen request may be successfully completed.)
+    pub fn add_transient_event<E, F>(
+        &self,
+        event_name: &'static str,
+        mut handler: F,
+    ) -> EventListenerHandle<dyn FnMut(E)>
+    where
+        E: 'static + AsRef<web_sys::Event> + wasm_bindgen::convert::FromWasmAbi,
+        F: 'static + FnMut(E),
+    {
+        let fullscreen_handler = Rc::downgrade(&self.fullscreen_handler);
+
+        self.add_event(event_name, move |event: E| {
+            handler(event);
+
+            if let Some(fullscreen_handler) = Weak::upgrade(&fullscreen_handler) {
+                fullscreen_handler.transient_activation()
+            }
+        })
     }
 }
 
