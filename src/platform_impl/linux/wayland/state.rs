@@ -361,9 +361,13 @@ impl CompositorHandler for WinitState {
 
     fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>, surface: &WlSurface, _: u32) {
         let window_id = super::make_wid(surface);
+        log::debug!("compositor frame() dispatched for window {:?}", window_id);
         let window = match self.windows.get_mut().get(&window_id) {
             Some(window) => window,
-            None => return,
+            None => {
+                log::debug!("compositor frame() for unknown window {:?}", window_id);
+                return;
+            }
         };
 
         // In case we have a redraw requested we must indicate the wake up.

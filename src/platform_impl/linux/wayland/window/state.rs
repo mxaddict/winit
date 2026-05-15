@@ -4,7 +4,7 @@ use std::num::NonZeroU32;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
-use log::{info, warn};
+use log::{debug, info, warn};
 
 use sctk::reexports::client::protocol::wl_seat::WlSeat;
 use sctk::reexports::client::protocol::wl_shm::WlShm;
@@ -261,6 +261,7 @@ impl WindowState {
 
     /// The frame callback was received, but not yet sent to the user.
     pub fn frame_callback_received(&mut self) {
+        debug!("frame-cb: received (was {:?})", self.frame_callback_state);
         self.frame_callback_state = FrameCallbackState::Received;
     }
 
@@ -274,10 +275,13 @@ impl WindowState {
         let surface = self.window.wl_surface().clone();
         match self.frame_callback_state {
             FrameCallbackState::None | FrameCallbackState::Received => {
+                debug!("frame-cb: arming (was {:?})", self.frame_callback_state);
                 self.frame_callback_state = FrameCallbackState::Requested;
                 surface.frame(&self.queue_handle, surface.clone());
             }
-            FrameCallbackState::Requested => (),
+            FrameCallbackState::Requested => {
+                debug!("frame-cb: arm skipped, already Requested");
+            }
         }
     }
 
