@@ -604,6 +604,22 @@ impl WindowState {
         self.layer_configured = true;
     }
 
+    /// Apply a new size from a layer-surface configure WITHOUT triggering
+    /// the xdg-specific resize side-effects (CSD frame resize,
+    /// xdg_surface.set_window_geometry, etc.). Only mutates the stored
+    /// size and the viewport destination if both axes are non-zero —
+    /// wp_viewport.set_destination rejects zero on either axis with a
+    /// protocol error, which we'd hit here because the layer surface
+    /// commonly receives configures with one axis = 0 (= "you decide").
+    pub(crate) fn apply_layer_size(&mut self, inner_size: LogicalSize<u32>) {
+        self.size = inner_size;
+        if let Some(viewport) = self.viewport.as_ref() {
+            if inner_size.width > 0 && inner_size.height > 0 {
+                viewport.set_destination(inner_size.width as _, inner_size.height as _);
+            }
+        }
+    }
+
     #[inline]
     pub fn is_decorated(&mut self) -> bool {
         let csd = self

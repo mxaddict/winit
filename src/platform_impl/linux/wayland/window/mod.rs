@@ -138,8 +138,26 @@ impl Window {
             let (mt, mr, mb, ml) = layer_attrs.margin;
             layer_surface.set_margin(mt, mr, mb, ml);
             layer_surface.set_keyboard_interactivity(sctk_ki);
-            // Use (0, 0) so the compositor derives size from the anchor configuration.
-            layer_surface.set_size(0, 0);
+
+            // Per zwlr_layer_surface_v1.set_size: a dimension may be 0 only
+            // if it's anchored to both opposite edges on that axis.
+            // Otherwise 0 is a protocol error and the compositor disconnects
+            // us (Hyprland and sway both enforce this).
+            //
+            // Width is "free" iff LEFT|RIGHT both set; height iff TOP|BOTTOM
+            // both set. For axes that aren't free we fall back to the
+            // builder's inner_size, or to a sensible default if absent.
+            let horiz_free = sctk_anchor
+                .contains(sctk::shell::wlr_layer::Anchor::LEFT | sctk::shell::wlr_layer::Anchor::RIGHT);
+            let vert_free = sctk_anchor
+                .contains(sctk::shell::wlr_layer::Anchor::TOP | sctk::shell::wlr_layer::Anchor::BOTTOM);
+            let fallback = attributes
+                .inner_size
+                .map(|s| s.to_logical::<u32>(1.0))
+                .unwrap_or(LogicalSize::new(600, 400));
+            let init_w = if horiz_free { 0 } else { fallback.width.max(1) };
+            let init_h = if vert_free { 0 } else { fallback.height.max(1) };
+            layer_surface.set_size(init_w, init_h);
             layer_surface.commit();
 
             state::Shell::Layer(layer_surface)

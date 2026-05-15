@@ -475,10 +475,13 @@ impl LayerShellHandler for WinitState {
 
             // Actually mutate the WindowState's size. Without this, wgpu's
             // swapchain and the compositor disagree on dimensions and present
-            // blocks after the first frame; the xdg path mutates size inside
-            // its own configure() — mirror that here.
+            // blocks after the first frame. We can't reuse the xdg
+            // `WindowState::resize` because it also pokes the CSD frame
+            // and `xdg_surface.set_window_geometry` — both invalid for a
+            // layer surface. The layer-safe helper just updates `size`
+            // and (when both axes are non-zero) the viewport destination.
             if new_size != current {
-                ws.resize(new_size);
+                ws.apply_layer_size(new_size);
             }
 
             self.window_compositor_updates[pos].size = Some(new_size);
