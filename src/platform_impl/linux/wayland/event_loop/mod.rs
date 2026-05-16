@@ -483,17 +483,8 @@ impl<T: 'static> EventLoop<T> {
                         .unwrap();
 
                     if window.frame_callback_state() == FrameCallbackState::Requested {
-                        log::debug!(
-                            "redraw-tick: skipping window {:?} — frame_callback still Requested",
-                            window_id
-                        );
                         false
                     } else {
-                        log::debug!(
-                            "redraw-tick: window {:?} state={:?}, proceeding",
-                            window_id,
-                            window.frame_callback_state()
-                        );
                         // Reset the frame callbacks state.
                         window.frame_callback_reset();
                         let mut redraw_requested = window_requests

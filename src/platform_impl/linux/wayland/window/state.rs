@@ -261,7 +261,6 @@ impl WindowState {
 
     /// The frame callback was received, but not yet sent to the user.
     pub fn frame_callback_received(&mut self) {
-        debug!("frame-cb: received (was {:?})", self.frame_callback_state);
         self.frame_callback_state = FrameCallbackState::Received;
     }
 
@@ -275,13 +274,10 @@ impl WindowState {
         let surface = self.window.wl_surface().clone();
         match self.frame_callback_state {
             FrameCallbackState::None | FrameCallbackState::Received => {
-                debug!("frame-cb: arming (was {:?})", self.frame_callback_state);
                 self.frame_callback_state = FrameCallbackState::Requested;
                 surface.frame(&self.queue_handle, surface.clone());
             }
-            FrameCallbackState::Requested => {
-                debug!("frame-cb: arm skipped, already Requested");
-            }
+            FrameCallbackState::Requested => {}
         }
     }
 
