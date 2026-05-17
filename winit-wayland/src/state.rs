@@ -14,6 +14,9 @@ use sctk::reexports::client::{Connection, Proxy, QueueHandle};
 use sctk::registry::{ProvidesRegistryState, RegistryState};
 use sctk::seat::pointer::ThemedPointer;
 use sctk::seat::SeatState;
+use sctk::shell::wlr_layer::{
+    LayerShell, LayerShellHandler, LayerSurface, LayerSurfaceConfigure,
+};
 use sctk::shell::xdg::window::{Window, WindowConfigure, WindowHandler};
 use sctk::shell::xdg::XdgShell;
 use sctk::shell::WaylandSurface;
@@ -60,6 +63,11 @@ pub struct WinitState {
 
     /// The XDG shell that is used for windows.
     pub xdg_shell: XdgShell,
+
+    /// The wlr-layer-shell global, if the compositor advertises it.
+    /// `None` on GNOME Mutter and any compositor that doesn't implement
+    /// `wlr-layer-shell-unstable-v1`; callers fall back to xdg toplevels.
+    pub layer_shell: Option<LayerShell>,
 
     /// The currently present windows.
     pub windows: RefCell<AHashMap<WindowId, Arc<Mutex<WindowState>>>>,
@@ -180,6 +188,7 @@ impl WinitState {
             shm,
 
             xdg_shell: XdgShell::bind(globals, queue_handle).map_err(|err| os_error!(err))?,
+            layer_shell: LayerShell::bind(globals, queue_handle).ok(),
             xdg_activation: XdgActivationState::bind(globals, queue_handle).ok(),
             xdg_toplevel_icon_manager: XdgToplevelIconManagerState::bind(globals, queue_handle)
                 .ok(),
@@ -452,3 +461,28 @@ sctk::delegate_registry!(WinitState);
 sctk::delegate_shm!(WinitState);
 sctk::delegate_xdg_shell!(WinitState);
 sctk::delegate_xdg_window!(WinitState);
+sctk::delegate_layer!(WinitState);
+
+impl LayerShellHandler for WinitState {
+    fn closed(
+        &mut self,
+        _conn: &sctk::reexports::client::Connection,
+        _qh: &QueueHandle<Self>,
+        _layer: &LayerSurface,
+    ) {
+        // Layer-surface routing lands in the next commit (Window::new
+        // layer-surface branch). Until then this is a no-op stub so the
+        // `delegate_layer!` macro above resolves.
+    }
+
+    fn configure(
+        &mut self,
+        _conn: &sctk::reexports::client::Connection,
+        _qh: &QueueHandle<Self>,
+        _layer: &LayerSurface,
+        _configure: LayerSurfaceConfigure,
+        _serial: u32,
+    ) {
+        // See `closed` above — wired in the layer-surface branch commit.
+    }
+}
