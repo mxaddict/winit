@@ -145,10 +145,10 @@ impl Window {
                 .contains(sctk::shell::wlr_layer::Anchor::LEFT | sctk::shell::wlr_layer::Anchor::RIGHT);
             let vert_free = sctk_anchor
                 .contains(sctk::shell::wlr_layer::Anchor::TOP | sctk::shell::wlr_layer::Anchor::BOTTOM);
-            let fallback = attributes
-                .surface_size
-                .map(|s| s.to_logical::<u32>(1.0))
-                .unwrap_or(LogicalSize::new(600, 400));
+            // Use the already-resolved `size` (which incorporates the default
+            // 800×600 fallback) as the anchor-free axis dimension, so a caller
+            // who didn't set surface_size still gets a sensible non-zero value.
+            let fallback = size.to_logical::<u32>(1.0);
             let init_w = if horiz_free { 0 } else { fallback.width.max(1) };
             let init_h = if vert_free { 0 } else { fallback.height.max(1) };
             layer_surface.set_size(init_w, init_h);
