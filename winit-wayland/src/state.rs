@@ -516,7 +516,19 @@ impl LayerShellHandler for WinitState {
                 ws.apply_layer_size(new_size);
             }
 
+            // Always signal resize so the event loop delivers SurfaceResized
+            // and triggers the initial redraw. The xdg path does the same via
+            // `configure()` returning true on the first call.
             self.window_compositor_updates[pos].resized = true;
         }
+
+        // Mirror the xdg configure path: mark a redraw requested so the
+        // client is woken up to commit after the configure.
+        if let Some(requests) = self.window_requests.get_mut().get(&window_id) {
+            requests.redraw_requested.store(true, Ordering::Relaxed);
+        }
+
+        // Manually mark that we've got an event, since configure may not generate a resize.
+        self.dispatched_events = true;
     }
 }
