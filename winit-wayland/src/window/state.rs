@@ -21,6 +21,7 @@ use sctk::reexports::protocols::wp::text_input::zv3::client::zwp_text_input_v3::
 use sctk::reexports::protocols::wp::viewporter::client::wp_viewport::WpViewport;
 use sctk::reexports::protocols::xdg::shell::client::xdg_toplevel::ResizeEdge as XdgResizeEdge;
 use sctk::seat::pointer::{PointerDataExt, ThemedPointer};
+use sctk::shell::wlr_layer::LayerSurface;
 use sctk::shell::xdg::window::{DecorationMode, Window, WindowConfigure};
 use sctk::shell::xdg::XdgSurface;
 use sctk::shell::WaylandSurface;
@@ -160,8 +161,12 @@ pub struct WindowState {
     /// The value is the serial of the event triggered moved.
     has_pending_move: Option<u32>,
 
-    /// The underlying SCTK window.
-    pub window: Window,
+    /// The underlying SCTK shell role — either an xdg toplevel or a layer surface.
+    pub window: Shell,
+
+    /// Whether a layer surface has received its first configure. Always `false`
+    /// for xdg toplevels; those use `last_configure.is_some()` instead.
+    layer_configured: bool,
 
     // NOTE: The spec says that destroying parent(`window` in our case), will unmap the
     // subsurfaces. Thus to achieve atomic unmap of the client, drop the decorations
@@ -171,6 +176,32 @@ pub struct WindowState {
     frame: Option<WinitFrame>,
 }
 
+/// Which Wayland shell role backs this window.
+#[derive(Debug)]
+pub enum Shell {
+    Xdg(Window),
+    Layer(LayerSurface),
+}
+
+impl Shell {
+    pub fn wl_surface(&self) -> &WlSurface {
+        match self {
+            Shell::Xdg(w) => w.wl_surface(),
+            Shell::Layer(l) => l.wl_surface(),
+        }
+    }
+
+    /// Set buffer scale. Layer surfaces inherit output scale from the
+    /// compositor, but the underlying `WaylandSurface` impl still accepts
+    /// the call safely.
+    pub fn set_buffer_scale(&self, scale: u32) -> Result<(), sctk::shell::Unsupported> {
+        match self {
+            Shell::Xdg(w) => w.set_buffer_scale(scale),
+            Shell::Layer(l) => l.set_buffer_scale(scale),
+        }
+    }
+}
+
 impl WindowState {
     /// Create new window state.
     pub fn new(
@@ -178,19 +209,20 @@ impl WindowState {
         queue_handle: &QueueHandle<WinitState>,
         winit_state: &WinitState,
         initial_size: Size,
-        window: Window,
+        window: Shell,
         theme: Option<Theme>,
     ) -> Self {
         let compositor = winit_state.compositor_state.clone();
         let pointer_constraints = winit_state.pointer_constraints.clone();
+        let wl_surface = window.wl_surface();
         let viewport = winit_state
             .viewporter_state
             .as_ref()
-            .map(|state| state.get_viewport(window.wl_surface(), queue_handle));
+            .map(|state| state.get_viewport(wl_surface, queue_handle));
         let fractional_scale = winit_state
             .fractional_scaling_manager
             .as_ref()
-            .map(|fsm| fsm.fractional_scaling(window.wl_surface(), queue_handle));
+            .map(|fsm| fsm.fractional_scaling(wl_surface, queue_handle));
 
         let xdg_toplevel_icon_manager = winit_state
             .xdg_toplevel_icon_manager
@@ -234,6 +266,7 @@ impl WindowState {
             transparent: false,
             viewport,
             window,
+            layer_configured: false,
         }
     }
 
@@ -265,7 +298,7 @@ impl WindowState {
 
     /// Request a frame callback if we don't have one for this window in flight.
     pub fn request_frame_callback(&mut self) {
-        let surface = self.window.wl_surface();
+        let surface = self.window.wl_surface().clone();
         match self.frame_callback_state {
             FrameCallbackState::None | FrameCallbackState::Received => {
                 self.frame_callback_state = FrameCallbackState::Requested;
@@ -289,36 +322,40 @@ impl WindowState {
             self.stateless_size = self.size;
         }
 
-        if let Some(subcompositor) = subcompositor.as_ref().filter(|_| {
-            configure.decoration_mode == DecorationMode::Client
-                && self.frame.is_none()
-                && !self.csd_fails
-        }) {
-            match WinitFrame::new(
-                &self.window,
-                shm,
-                #[cfg(feature = "sctk-adwaita")]
-                self.compositor.clone(),
-                subcompositor.clone(),
-                self.queue_handle.clone(),
-                #[cfg(feature = "sctk-adwaita")]
-                create_sctk_adwaita_config(self.theme),
-            ) {
-                Ok(mut frame) => {
-                    frame.set_title(&self.title);
-                    frame.set_scaling_factor(self.scale_factor);
-                    // Hide the frame if we were asked to not decorate.
-                    frame.set_hidden(!self.decorate);
-                    self.frame = Some(frame);
-                },
-                Err(err) => {
-                    warn!("Failed to create client side decorations frame: {err}");
-                    self.csd_fails = true;
-                },
+        // CSD frames are only for xdg toplevels; layer surfaces have no
+        // decoration protocol equivalent.
+        if let Shell::Xdg(ref xdg_window) = self.window {
+            if let Some(subcompositor) = subcompositor.as_ref().filter(|_| {
+                configure.decoration_mode == DecorationMode::Client
+                    && self.frame.is_none()
+                    && !self.csd_fails
+            }) {
+                match WinitFrame::new(
+                    xdg_window,
+                    shm,
+                    #[cfg(feature = "sctk-adwaita")]
+                    self.compositor.clone(),
+                    subcompositor.clone(),
+                    self.queue_handle.clone(),
+                    #[cfg(feature = "sctk-adwaita")]
+                    create_sctk_adwaita_config(self.theme),
+                ) {
+                    Ok(mut frame) => {
+                        frame.set_title(&self.title);
+                        frame.set_scaling_factor(self.scale_factor);
+                        // Hide the frame if we were asked to not decorate.
+                        frame.set_hidden(!self.decorate);
+                        self.frame = Some(frame);
+                    },
+                    Err(err) => {
+                        warn!("Failed to create client side decorations frame: {err}");
+                        self.csd_fails = true;
+                    },
+                }
+            } else if configure.decoration_mode == DecorationMode::Server {
+                // Drop the frame for server side decorations to save resources.
+                self.frame = None;
             }
-        } else if configure.decoration_mode == DecorationMode::Server {
-            // Drop the frame for server side decorations to save resources.
-            self.frame = None;
         }
 
         let stateless = Self::is_stateless(&configure);
@@ -408,7 +445,16 @@ impl WindowState {
 
     /// Start interacting drag resize.
     pub fn drag_resize_window(&self, direction: ResizeDirection) -> Result<(), RequestError> {
-        let xdg_toplevel = self.window.xdg_toplevel();
+        let xdg_toplevel = match &self.window {
+            Shell::Xdg(w) => w.xdg_toplevel(),
+            // Layer surfaces are positioned by the compositor; interactive resize is not applicable.
+            Shell::Layer(_) => {
+                return Err(NotSupportedError::new(
+                    "drag-resize is not supported for layer surfaces",
+                )
+                .into())
+            },
+        };
 
         // TODO(kchibisov) handle touch serials.
         self.apply_on_pointer(|_, data| {
@@ -422,7 +468,16 @@ impl WindowState {
 
     /// Start the window drag.
     pub fn drag_window(&self) -> Result<(), RequestError> {
-        let xdg_toplevel = self.window.xdg_toplevel();
+        let xdg_toplevel = match &self.window {
+            Shell::Xdg(w) => w.xdg_toplevel(),
+            // Layer surfaces are compositor-positioned; interactive move is not applicable.
+            Shell::Layer(_) => {
+                return Err(NotSupportedError::new(
+                    "drag-move is not supported for layer surfaces",
+                )
+                .into())
+            },
+        };
         // TODO(kchibisov) handle touch serials.
         self.apply_on_pointer(|_, data| {
             let serial = data.latest_button_serial();
@@ -445,10 +500,16 @@ impl WindowState {
         window_id: WindowId,
         updates: &mut Vec<WindowCompositorUpdate>,
     ) -> Option<bool> {
+        // CSD frames only appear on xdg toplevels; layer surfaces never have a
+        // WinitFrame so frame.as_mut() above already returns None for them.
+        let xdg_window = match &self.window {
+            Shell::Xdg(w) => w,
+            Shell::Layer(_) => return None,
+        };
         match self.frame.as_mut()?.on_click(timestamp, click, pressed)? {
-            FrameAction::Minimize => self.window.set_minimized(),
-            FrameAction::Maximize => self.window.set_maximized(),
-            FrameAction::UnMaximize => self.window.unset_maximized(),
+            FrameAction::Minimize => xdg_window.set_minimized(),
+            FrameAction::Maximize => xdg_window.set_maximized(),
+            FrameAction::UnMaximize => xdg_window.unset_maximized(),
             FrameAction::Close => WinitState::queue_close(updates, window_id),
             FrameAction::Move => self.has_pending_move = Some(serial),
             FrameAction::Resize(edge) => {
@@ -464,9 +525,9 @@ impl WindowState {
                     ResizeEdge::BottomRight => XdgResizeEdge::BottomRight,
                     _ => return None,
                 };
-                self.window.resize(seat, serial, edge);
+                xdg_window.resize(seat, serial, edge);
             },
-            FrameAction::ShowMenu(x, y) => self.window.show_window_menu(seat, serial, (x, y)),
+            FrameAction::ShowMenu(x, y) => xdg_window.show_window_menu(seat, serial, (x, y)),
             _ => (),
         };
 
@@ -496,7 +557,10 @@ impl WindowState {
             // If we have a cursor change, that means that cursor is over the decorations,
             // so try to apply move.
             if let Some(serial) = cursor.is_some().then_some(serial).flatten() {
-                self.window.move_(seat, serial);
+                // Only xdg toplevels support interactive move via the compositor.
+                if let Shell::Xdg(w) = &self.window {
+                    w.move_(seat, serial);
+                }
                 None
             } else {
                 cursor
@@ -563,7 +627,31 @@ impl WindowState {
     /// Whether the window received initial configure event from the compositor.
     #[inline]
     pub fn is_configured(&self) -> bool {
-        self.last_configure.is_some()
+        match &self.window {
+            Shell::Xdg(_) => self.last_configure.is_some(),
+            Shell::Layer(_) => self.layer_configured,
+        }
+    }
+
+    /// Mark a layer surface as having received its initial configure.
+    pub fn mark_layer_configured(&mut self) {
+        self.layer_configured = true;
+    }
+
+    /// Apply a new size from a layer-surface configure WITHOUT triggering
+    /// the xdg-specific resize side-effects (CSD frame resize,
+    /// xdg_surface.set_window_geometry, etc.). Only mutates the stored
+    /// size and the viewport destination when both axes are non-zero —
+    /// wp_viewport.set_destination rejects zero on either axis with a
+    /// protocol error, which we'd hit because layer surfaces commonly
+    /// receive configures with one axis = 0 (= "you decide").
+    pub(crate) fn apply_layer_size(&mut self, inner_size: dpi::LogicalSize<u32>) {
+        self.size = inner_size;
+        if let Some(viewport) = self.viewport.as_ref() {
+            if inner_size.width > 0 && inner_size.height > 0 {
+                viewport.set_destination(inner_size.width as _, inner_size.height as _);
+            }
+        }
     }
 
     #[inline]
@@ -638,7 +726,7 @@ impl WindowState {
 
     /// Reissue the transparency hint to the compositor.
     pub fn reload_transparency_hint(&self) {
-        let surface = self.window.wl_surface();
+        let surface = self.window.wl_surface().clone();
 
         if self.transparent {
             surface.set_opaque_region(None);
@@ -686,13 +774,16 @@ impl WindowState {
         // Reload the hint.
         self.reload_transparency_hint();
 
-        // Set the window geometry.
-        self.window.xdg_surface().set_window_geometry(
-            x,
-            y,
-            outer_size.width as i32,
-            outer_size.height as i32,
-        );
+        // Set the window geometry. Layer surfaces don't have an xdg_surface;
+        // the compositor uses the anchor/size state set during creation.
+        if let Shell::Xdg(w) = &self.window {
+            w.xdg_surface().set_window_geometry(
+                x,
+                y,
+                outer_size.width as i32,
+                outer_size.height as i32,
+            );
+        }
 
         // Update the target viewport, this is used if and only if fractional scaling is in use.
         if let Some(viewport) = self.viewport.as_ref() {
@@ -795,7 +886,10 @@ impl WindowState {
             .unwrap_or(size);
 
         self.min_surface_size = size;
-        self.window.set_min_size(Some(size.into()));
+        // min/max size hints are xdg_toplevel-only; layer surfaces have no equivalent.
+        if let Shell::Xdg(w) = &self.window {
+            w.set_min_size(Some(size.into()));
+        }
     }
 
     /// Set maximum inner window size.
@@ -808,7 +902,10 @@ impl WindowState {
         });
 
         self.max_surface_size = size;
-        self.window.set_max_size(size.map(Into::into));
+        // min/max size hints are xdg_toplevel-only; layer surfaces have no equivalent.
+        if let Shell::Xdg(w) = &self.window {
+            w.set_max_size(size.map(Into::into));
+        }
     }
 
     /// Set the CSD theme.
@@ -878,16 +975,16 @@ impl WindowState {
         }
 
         let mut set_mode = false;
-        let surface = self.window.wl_surface();
+        let surface = self.window.wl_surface().clone();
         match mode {
             CursorGrabMode::Locked => self.apply_on_pointer(|pointer, data| {
                 let pointer = pointer.pointer();
-                data.lock_pointer(pointer_constraints, surface, pointer, &self.queue_handle);
+                data.lock_pointer(pointer_constraints, &surface, pointer, &self.queue_handle);
                 set_mode = true;
             }),
             CursorGrabMode::Confined => self.apply_on_pointer(|pointer, data| {
                 let pointer = pointer.pointer();
-                data.confine_pointer(pointer_constraints, surface, pointer, &self.queue_handle);
+                data.confine_pointer(pointer_constraints, &surface, pointer, &self.queue_handle);
                 set_mode = true;
             }),
             CursorGrabMode::None => {
@@ -905,12 +1002,15 @@ impl WindowState {
     }
 
     pub fn show_window_menu(&self, position: LogicalPosition<u32>) {
-        // TODO(kchibisov) handle touch serials.
-        self.apply_on_pointer(|_, data| {
-            let serial = data.latest_button_serial();
-            let seat = data.seat();
-            self.window.show_window_menu(seat, serial, position.into());
-        });
+        // Only xdg toplevels support the window menu (compositor-drawn context menu).
+        if let Shell::Xdg(w) = &self.window {
+            // TODO(kchibisov) handle touch serials.
+            self.apply_on_pointer(|_, data| {
+                let serial = data.latest_button_serial();
+                let seat = data.seat();
+                w.show_window_menu(seat, serial, position.into());
+            });
+        }
     }
 
     /// Set the position of the cursor.
@@ -961,13 +1061,17 @@ impl WindowState {
 
         self.decorate = decorate;
 
-        match self.last_configure.as_ref().map(|configure| configure.decoration_mode) {
-            Some(DecorationMode::Server) if !self.decorate => {
-                // To disable decorations we should request client and hide the frame.
-                self.window.request_decoration_mode(Some(DecorationMode::Client))
-            },
-            _ if self.decorate => self.window.request_decoration_mode(Some(DecorationMode::Server)),
-            _ => (),
+        // Decoration mode negotiation is an xdg_toplevel protocol feature; layer
+        // surfaces have no decoration protocol equivalent.
+        if let Shell::Xdg(w) = &self.window {
+            match self.last_configure.as_ref().map(|configure| configure.decoration_mode) {
+                Some(DecorationMode::Server) if !self.decorate => {
+                    // To disable decorations we should request client and hide the frame.
+                    w.request_decoration_mode(Some(DecorationMode::Client))
+                },
+                _ if self.decorate => w.request_decoration_mode(Some(DecorationMode::Server)),
+                _ => (),
+            }
         }
 
         if let Some(frame) = self.frame.as_mut() {
@@ -1051,7 +1155,7 @@ impl WindowState {
 
         // NOTE: When fractional scaling is not used update the buffer scale.
         if self.fractional_scale.is_none() {
-            let _ = self.window.set_buffer_scale(self.scale_factor as _);
+            let _ = self.window.set_buffer_scale(self.scale_factor as u32);
         }
 
         if let Some(frame) = self.frame.as_mut() {
@@ -1064,14 +1168,16 @@ impl WindowState {
     pub fn set_blur(&mut self, blurred: bool) {
         if blurred && self.blur.is_none() {
             if let Some(blur_manager) = self.blur_manager.as_ref() {
-                let blur = blur_manager.blur(self.window.wl_surface(), &self.queue_handle);
+                let surface = self.window.wl_surface().clone();
+                let blur = blur_manager.blur(&surface, &self.queue_handle);
                 blur.commit();
                 self.blur = Some(blur);
             } else {
                 info!("Blur manager unavailable, unable to change blur")
             }
         } else if !blurred && self.blur.is_some() {
-            self.blur_manager.as_ref().unwrap().unset(self.window.wl_surface());
+            let surface = self.window.wl_surface().clone();
+            self.blur_manager.as_ref().unwrap().unset(&surface);
             self.blur.take().unwrap().release();
         }
     }
@@ -1095,7 +1201,10 @@ impl WindowState {
             frame.set_title(&title);
         }
 
-        self.window.set_title(&title);
+        // Title is an xdg_toplevel property; layer surfaces have no title concept.
+        if let Shell::Xdg(w) = &self.window {
+            w.set_title(&title);
+        }
         self.title = title;
     }
 
@@ -1130,7 +1239,12 @@ impl WindowState {
             None => (None, None),
         };
 
-        xdg_toplevel_icon_manager.set_icon(self.window.xdg_toplevel(), xdg_toplevel_icon.as_ref());
+        // Icons are an xdg_toplevel feature; silently skip for layer surfaces.
+        let xdg_toplevel = match &self.window {
+            Shell::Xdg(w) => w.xdg_toplevel(),
+            Shell::Layer(_) => return,
+        };
+        xdg_toplevel_icon_manager.set_icon(xdg_toplevel, xdg_toplevel_icon.as_ref());
         self.toplevel_icon = toplevel_icon;
 
         if let Some(xdg_toplevel_icon) = xdg_toplevel_icon {

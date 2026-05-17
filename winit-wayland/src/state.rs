@@ -468,21 +468,55 @@ impl LayerShellHandler for WinitState {
         &mut self,
         _conn: &sctk::reexports::client::Connection,
         _qh: &QueueHandle<Self>,
-        _layer: &LayerSurface,
+        layer: &LayerSurface,
     ) {
-        // Layer-surface routing lands in the next commit (Window::new
-        // layer-surface branch). Until then this is a no-op stub so the
-        // `delegate_layer!` macro above resolves.
+        let window_id = super::make_wid(layer.wl_surface());
+        Self::queue_close(&mut self.window_compositor_updates, window_id);
     }
 
     fn configure(
         &mut self,
         _conn: &sctk::reexports::client::Connection,
         _qh: &QueueHandle<Self>,
-        _layer: &LayerSurface,
-        _configure: LayerSurfaceConfigure,
+        layer: &LayerSurface,
+        configure: LayerSurfaceConfigure,
         _serial: u32,
     ) {
-        // See `closed` above — wired in the layer-surface branch commit.
+        let window_id = super::make_wid(layer.wl_surface());
+
+        let pos = if let Some(pos) = self
+            .window_compositor_updates
+            .iter()
+            .position(|update| update.window_id == window_id)
+        {
+            pos
+        } else {
+            self.window_compositor_updates.push(WindowCompositorUpdate::new(window_id));
+            self.window_compositor_updates.len() - 1
+        };
+
+        if let Some(window_state) = self.windows.get_mut().get_mut(&window_id) {
+            let mut ws = window_state.lock().unwrap();
+            ws.mark_layer_configured();
+
+            // Per zwlr_layer_surface_v1.configure: zero on EITHER axis means
+            // "client decides for that axis". Mix axis-by-axis with the
+            // current size instead of treating any zero as "keep both".
+            let (new_w, new_h) = configure.new_size;
+            let current = ws.surface_size();
+            let new_size = dpi::LogicalSize::new(
+                if new_w > 0 { new_w } else { current.width },
+                if new_h > 0 { new_h } else { current.height },
+            );
+
+            // Mutate WindowState size via the layer-safe helper (avoids the
+            // xdg-specific CSD frame and xdg_surface.set_window_geometry side
+            // effects that the regular `resize()` triggers).
+            if new_size != current {
+                ws.apply_layer_size(new_size);
+            }
+
+            self.window_compositor_updates[pos].resized = true;
+        }
     }
 }
