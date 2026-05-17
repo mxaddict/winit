@@ -41,7 +41,12 @@ bitflags! {
 }
 
 /// How a layer surface participates in keyboard focus.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// Defaults to [`OnDemand`][KeyboardInteractivity::OnDemand] — Exclusive
+/// behaves like a lockscreen and suppresses every compositor binding
+/// (including window-close shortcuts). Callers like screen lockers can opt
+/// in explicitly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum KeyboardInteractivity {
     /// Surface receives no keyboard input.
     None,
@@ -49,21 +54,13 @@ pub enum KeyboardInteractivity {
     /// This is what rofi, wofi, and similar pickers use: the compositor
     /// grants focus on click / per-anchor policy and lets compositor
     /// bindings continue to fire alongside.
+    #[default]
     OnDemand,
     /// Surface captures all keyboard input while visible. Used by
     /// screen lockers and login prompts; the compositor sends key events
     /// here even when the previously-focused toplevel would otherwise
     /// have them.
     Exclusive,
-}
-
-impl Default for KeyboardInteractivity {
-    fn default() -> Self {
-        // OnDemand by default — Exclusive behaves like a lockscreen and
-        // suppresses every compositor binding including window-close
-        // shortcuts. Callers like screen lockers can opt in explicitly.
-        KeyboardInteractivity::OnDemand
-    }
 }
 
 /// Attributes describing a `zwlr_layer_surface_v1`.

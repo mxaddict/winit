@@ -28,12 +28,14 @@ use winit_core::window::{
     WindowLevel,
 };
 
-use crate::layer_shell::{Anchor as WinitAnchor, KeyboardInteractivity as WinitKi, Layer as WinitLayer};
 use super::event_loop::sink::EventSink;
 use super::output::MonitorHandle;
 use super::state::WinitState;
 use super::types::xdg_activation::XdgActivationTokenData;
 use super::ActiveEventLoop;
+use crate::layer_shell::{
+    Anchor as WinitAnchor, KeyboardInteractivity as WinitKi, Layer as WinitLayer,
+};
 use crate::{output, WindowAttributesWayland};
 
 pub(crate) mod state;
@@ -119,9 +121,10 @@ impl Window {
             let sctk_ki = convert_keyboard_interactivity(layer_attrs.keyboard_interactivity);
 
             // Resolve the output, if the caller pinned one.
-            let output = layer_attrs.output.as_ref().and_then(|mh| {
-                mh.cast_ref::<output::MonitorHandle>().map(|handle| &handle.proxy)
-            });
+            let output = layer_attrs
+                .output
+                .as_ref()
+                .and_then(|mh| mh.cast_ref::<output::MonitorHandle>().map(|handle| &handle.proxy));
 
             let layer_surface = layer_shell.create_layer_surface(
                 &queue_handle,
@@ -141,10 +144,12 @@ impl Window {
             // Per zwlr_layer_surface_v1.set_size: a dimension may be 0 only
             // if it's anchored to both opposite edges on that axis.
             // Width is "free" iff LEFT|RIGHT both set; height iff TOP|BOTTOM both set.
-            let horiz_free = sctk_anchor
-                .contains(sctk::shell::wlr_layer::Anchor::LEFT | sctk::shell::wlr_layer::Anchor::RIGHT);
-            let vert_free = sctk_anchor
-                .contains(sctk::shell::wlr_layer::Anchor::TOP | sctk::shell::wlr_layer::Anchor::BOTTOM);
+            let horiz_free = sctk_anchor.contains(
+                sctk::shell::wlr_layer::Anchor::LEFT | sctk::shell::wlr_layer::Anchor::RIGHT,
+            );
+            let vert_free = sctk_anchor.contains(
+                sctk::shell::wlr_layer::Anchor::TOP | sctk::shell::wlr_layer::Anchor::BOTTOM,
+            );
             // Use the already-resolved `size` (which incorporates the default
             // 800×600 fallback) as the anchor-free axis dimension, so a caller
             // who didn't set surface_size still gets a sensible non-zero value.
@@ -190,8 +195,7 @@ impl Window {
             };
 
             // Activate the window when the token is passed.
-            if let (Some(xdg_activation), Some(token)) =
-                (xdg_activation.as_ref(), activation_token)
+            if let (Some(xdg_activation), Some(token)) = (xdg_activation.as_ref(), activation_token)
             {
                 xdg_activation.activate(token.into_raw(), &surface);
             }
@@ -295,6 +299,21 @@ impl Window {
         match &self.window {
             state::Shell::Xdg(w) => NonNull::new(w.xdg_toplevel().id().as_ptr().cast()),
             state::Shell::Layer(_) => None,
+        }
+    }
+
+    /// Returns the raw `zwlr_layer_surface_v1` pointer if this window is a
+    /// layer surface, or [`None`] if it is an xdg toplevel.
+    pub(crate) fn wl_layer_surface(&self) -> Option<NonNull<c_void>> {
+        match &self.window {
+            state::Shell::Layer(l) => {
+                use sctk::shell::wlr_layer::SurfaceKind;
+                match l.kind() {
+                    SurfaceKind::Wlr(s) => NonNull::new(s.id().as_ptr().cast()),
+                    _ => None,
+                }
+            },
+            state::Shell::Xdg(_) => None,
         }
     }
 }

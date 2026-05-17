@@ -14,9 +14,7 @@ use sctk::reexports::client::{Connection, Proxy, QueueHandle};
 use sctk::registry::{ProvidesRegistryState, RegistryState};
 use sctk::seat::pointer::ThemedPointer;
 use sctk::seat::SeatState;
-use sctk::shell::wlr_layer::{
-    LayerShell, LayerShellHandler, LayerSurface, LayerSurfaceConfigure,
-};
+use sctk::shell::wlr_layer::{LayerShell, LayerShellHandler, LayerSurface, LayerSurfaceConfigure};
 use sctk::shell::xdg::window::{Window, WindowConfigure, WindowHandler};
 use sctk::shell::xdg::XdgShell;
 use sctk::shell::WaylandSurface;
@@ -484,10 +482,8 @@ impl LayerShellHandler for WinitState {
     ) {
         let window_id = super::make_wid(layer.wl_surface());
 
-        let pos = if let Some(pos) = self
-            .window_compositor_updates
-            .iter()
-            .position(|update| update.window_id == window_id)
+        let pos = if let Some(pos) =
+            self.window_compositor_updates.iter().position(|update| update.window_id == window_id)
         {
             pos
         } else {

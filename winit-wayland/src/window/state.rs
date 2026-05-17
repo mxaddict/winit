@@ -472,10 +472,9 @@ impl WindowState {
             Shell::Xdg(w) => w.xdg_toplevel(),
             // Layer surfaces are compositor-positioned; interactive move is not applicable.
             Shell::Layer(_) => {
-                return Err(NotSupportedError::new(
-                    "drag-move is not supported for layer surfaces",
+                return Err(
+                    NotSupportedError::new("drag-move is not supported for layer surfaces").into()
                 )
-                .into())
             },
         };
         // TODO(kchibisov) handle touch serials.

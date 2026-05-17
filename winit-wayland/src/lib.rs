@@ -80,14 +80,25 @@ pub trait EventLoopBuilderExtWayland {
 ///
 /// [`Window`]: crate::window::Window
 pub trait WindowExtWayland {
-    /// Returns `xdg_toplevel` of the window or [`None`] if the window is X11 window.
+    /// Returns `xdg_toplevel` of the window or [`None`] if this is a layer
+    /// surface.
     fn xdg_toplevel(&self) -> Option<NonNull<c_void>>;
+
+    /// Returns the raw `zwlr_layer_surface_v1` pointer if this window is a
+    /// layer surface built with [`WindowAttributesWayland::with_layer_shell`],
+    /// or [`None`] if it is an xdg toplevel.
+    fn wl_layer_surface(&self) -> Option<NonNull<c_void>>;
 }
 
 impl WindowExtWayland for dyn CoreWindow + '_ {
     #[inline]
     fn xdg_toplevel(&self) -> Option<NonNull<c_void>> {
         self.cast_ref::<Window>()?.xdg_toplevel()
+    }
+
+    #[inline]
+    fn wl_layer_surface(&self) -> Option<NonNull<c_void>> {
+        self.cast_ref::<Window>()?.wl_layer_surface()
     }
 }
 
