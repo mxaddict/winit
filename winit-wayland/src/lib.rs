@@ -34,6 +34,7 @@ macro_rules! os_error {
 }
 
 mod event_loop;
+pub mod layer_shell;
 mod output;
 mod seat;
 mod state;
@@ -41,6 +42,7 @@ mod types;
 mod window;
 
 pub use self::event_loop::{ActiveEventLoop, EventLoop};
+pub use self::layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellAttributes};
 pub use self::window::Window;
 
 /// Additional methods on [`ActiveEventLoop`] that are specific to Wayland.
@@ -100,6 +102,7 @@ pub(crate) struct ApplicationName {
 pub struct WindowAttributesWayland {
     pub(crate) name: Option<ApplicationName>,
     pub(crate) activation_token: Option<ActivationToken>,
+    pub(crate) layer_shell: Option<LayerShellAttributes>,
 }
 
 impl WindowAttributesWayland {
@@ -119,6 +122,21 @@ impl WindowAttributesWayland {
     #[inline]
     pub fn with_activation_token(mut self, token: ActivationToken) -> Self {
         self.activation_token = Some(token);
+        self
+    }
+
+    /// Build the window as a `zwlr_layer_surface_v1` instead of an
+    /// `xdg_toplevel`. Used for rofi-style overlays, panels, and lockers.
+    ///
+    /// The compositor must support the `wlr-layer-shell-unstable-v1`
+    /// protocol; on compositors that don't (notably GNOME Mutter),
+    /// [`crate::Window::new`] returns an error and the caller is expected to
+    /// fall back to a regular toplevel.
+    ///
+    /// On X11 and other platforms this attribute is silently ignored.
+    #[inline]
+    pub fn with_layer_shell(mut self, attrs: LayerShellAttributes) -> Self {
+        self.layer_shell = Some(attrs);
         self
     }
 }
